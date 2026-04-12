@@ -1,0 +1,199 @@
+#!/bin/bash
+# s6 longrun: manage PulseAudio stereo pair remap sinks.
+# Creates pairs on startup and reacts to physical sink add/remove events.
+set +e
+
+LOG="/config/local_pulse_audio_stereo_pairs/remap_modules.log"
+mkdir -p "$(dirname "$LOG")"
+
+log() { echo "$(date) — $*" >> "$LOG"; }
+
+# ---------------------------------------------------------------------------
+# Wait for PulseAudio
+# ---------------------------------------------------------------------------
+wait_for_pulse() {
+    for i in $(seq 1 30); do
+        pactl info >/dev/null 2>&1 && return 0
+        log "Waiting for PulseAudio... ($i)"
+        sleep 1
+    done
+    log "ERROR: PulseAudio not available after 30s"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Create stereo pair remap sinks for all current physical PA sinks.
+# Skips sinks that are already remap sinks and skips pairs that already exist.
+# Does NOT unload existing remaps — call cleanup_all_remaps first if needed.
+# ---------------------------------------------------------------------------
+create_pairs() {
+    log "Creating stereo pairs..."
+
+    declare -A stereo_pairs=(
+        ["front_stereo"]="front-left front-right"
+        ["rear_stereo"]="rear-left rear-right"
+        ["side_stereo"]="side-left side-right"
+        ["center_sub"]="front-center lfe"
+    )
+
+    full_sink_list=$(pactl list sinks)
+
+    sinks=$(echo "$full_sink_list" | grep -E 'Name:|alsa.card_name' | sed -n '
+        s/.*Name: //p
+        s/.*alsa.card_name = "\(.*\)"/\1/p
+    ' | paste - - | while read -r name card; do
+        card_clean=$(echo "$card" | tr ' -' '_' | tr -cd '[:alnum:]_')
+        echo "$name $card_clean"
+    done)
+
+    current_sinks_short=$(pactl list sinks short)
+
+    while read -r sink card; do
+        [[ -z "$sink" ]] && continue
+        [[ -z "$card" ]] && card=$(basename "$sink")
+
+        # Skip sinks that are already remap sinks
+        driver=$(echo "$full_sink_list" | awk -v target="$sink" '
+            /^[[:space:]]*Name: / {
+                current = $0; sub(/^[[:space:]]*Name: /, "", current)
+                found = (current == target); next
+            }
+            found && /Driver:/ { print $2; exit }
+        ')
+        [[ "$driver" == "module-remap-sink.c" ]] && continue
+
+        channel_map=$(echo "$full_sink_list" | awk -v target="$sink" '
+            /^[[:space:]]*Name: / {
+                current_sink = $0
+                sub(/^[[:space:]]*Name: /, "", current_sink)
+                found = (current_sink == target)
+                next
+            }
+            found && /^[[:space:]]*Channel Map:/ {
+                channel_map = $0
+                sub(/^[[:space:]]*Channel Map: /, "", channel_map)
+            }
+            found && /^Sink #/ && NR > 1 { exit }
+            END { print channel_map }
+        ')
+        [[ -z "$channel_map" ]] && continue
+
+        # S/PDIF sinks — single stereo remap
+        if [[ "$sink" =~ \.(iec958-[^.]+)$ ]]; then
+            port_name=$(echo "${BASH_REMATCH[1]}" | tr '-' '_')
+            remap_name="${card}_${port_name}"
+            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
+            log "Creating $remap_name from $sink (S/PDIF)"
+            module_id=$(pactl load-module module-remap-sink \
+                sink_name="$remap_name" master="$sink" \
+                sink_properties="device.description=$remap_name" \
+                channels=2 master_channel_map="front-left,front-right" \
+                channel_map="front-left,front-right" remix=no 2>>"$LOG")
+            [[ "$module_id" =~ ^[0-9]+$ ]] \
+                && log "Loaded module $module_id for $remap_name" \
+                || log "Failed to load $remap_name"
+            continue
+        fi
+
+        # HDMI sinks — single stereo remap
+        if [[ "$sink" =~ \.(hdmi-[^.]+)$ ]]; then
+            port_name=$(echo "${BASH_REMATCH[1]}" | tr '-' '_')
+            remap_name="${card}_${port_name}"
+            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
+            log "Creating $remap_name from $sink (HDMI)"
+            module_id=$(pactl load-module module-remap-sink \
+                sink_name="$remap_name" master="$sink" \
+                sink_properties="device.description=$remap_name" \
+                channels=2 master_channel_map="front-left,front-right" \
+                channel_map="front-left,front-right" remix=no 2>>"$LOG")
+            [[ "$module_id" =~ ^[0-9]+$ ]] \
+                && log "Loaded module $module_id for $remap_name" \
+                || log "Failed to load $remap_name"
+            continue
+        fi
+
+        # Multi-channel sinks — one remap per channel pair present
+        for pair in "${!stereo_pairs[@]}"; do
+            required=(${stereo_pairs[$pair]})
+            if [[ "$channel_map" == *"${required[0]}"* && "$channel_map" == *"${required[1]}"* ]]; then
+                remap_name="${card}_${pair}"
+                echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
+                log "Creating $remap_name from $sink"
+                module_id=$(pactl load-module module-remap-sink \
+                    sink_name="$remap_name" master="$sink" \
+                    sink_properties="device.description=$remap_name" \
+                    channels=2 master_channel_map="${required[0]},${required[1]}" \
+                    channel_map="${required[0]},${required[1]}" remix=no 2>>"$LOG")
+                [[ "$module_id" =~ ^[0-9]+$ ]] \
+                    && log "Loaded module $module_id for $remap_name" \
+                    || log "Failed to load $remap_name"
+            fi
+        done
+
+    done <<< "$sinks"
+
+    log "Stereo pair creation pass complete"
+}
+
+# ---------------------------------------------------------------------------
+# Remove remap sinks whose master sink no longer exists
+# ---------------------------------------------------------------------------
+cleanup_orphaned_remaps() {
+    log "Checking for orphaned remap sinks..."
+    current_sinks=$(pactl list sinks short | awk '{print $2}')
+    pactl list short modules | awk '/module-remap-sink/ {print $1}' | while read -r mod_id; do
+        master=$(pactl list modules | awk -v id="$mod_id" '
+            /^Module #/ { current = $2 }
+            current == id && /master=/ {
+                match($0, /master=[^ \t]+/)
+                print substr($0, RSTART+7, RLENGTH-7)
+                exit
+            }
+        ')
+        if [[ -n "$master" ]] && ! echo "$current_sinks" | grep -q "^${master}$"; then
+            log "Unloading orphaned remap module $mod_id (master=$master gone)"
+            pactl unload-module "$mod_id"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+wait_for_pulse || exit 1
+
+# One-time setup on startup
+pactl unload-module module-suspend-on-idle 2>/dev/null || true
+for id in $(pactl list short modules | awk '/module-remap-sink/ {print $1}'); do
+    log "Unloading existing remap module $id"
+    pactl unload-module "$id"
+done
+
+create_pairs
+
+# Watch for physical sink changes only — ignore remap sink events by
+# filtering out events that correspond to module-remap-sink sinks.
+log "Watching for PulseAudio sink events..."
+pactl subscribe 2>>"$LOG" | grep -E "on sink" | while read -r event; do
+    # Extract sink index from event line e.g. "Event 'new' on sink #5"
+    sink_index=$(echo "$event" | grep -o '#[0-9]*' | tr -d '#')
+    if [[ -n "$sink_index" ]]; then
+        driver=$(pactl list sinks 2>/dev/null | awk -v idx="$sink_index" '
+            /^Sink #/ { found = ($2 == "#"idx) }
+            found && /Driver:/ { print $2; exit }
+        ')
+        # Ignore events from remap sinks to avoid feedback loop
+        [[ "$driver" == "module-remap-sink.c" ]] && continue
+    fi
+
+    log "PA event: $event"
+    sleep 1  # let PA settle
+    if [[ "$event" == *"'new'"* ]]; then
+        create_pairs
+    elif [[ "$event" == *"'remove'"* ]]; then
+        cleanup_orphaned_remaps
+    fi
+done
+
+log "pactl subscribe exited, restarting service..."
+exit 1

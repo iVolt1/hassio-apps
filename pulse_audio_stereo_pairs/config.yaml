@@ -1,0 +1,20 @@
+name: Pulse Audio Stereo Pairs
+version: 0.92
+slug: pulse_audio_stereo_pairs
+description: Create Pulse Audio stereo pairs from Surround sound cards
+arch:
+  - amd64
+map:
+  - type: addon_config
+    read_only: false
+privileged:
+  - SYS_ADMIN
+host_network: true
+audio: true
+init: false
+startup: services
+boot: auto
+stage: experimental
+backup: hot
+url: https://community.home-assistant.io/
+homeassistant: "0.110"
