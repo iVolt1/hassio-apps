@@ -87,8 +87,6 @@ This is useful for confirming which sinks were created and diagnosing any failur
 - If a physical audio device is unplugged, its associated remap sinks are automatically removed
 - Restartng the **Pulse Audio Out** provider in MA or restarting MA is necessary to reflect the changes when DACs are added or removed.
   
-## Setting the mutltichannel HA Audio profile if not already set
-
 # How to Set a Sound Card to Its Multichannel Profile
 
 By default PulseAudio may configure a sound card with a stereo profile even if the hardware supports 5.1 or 7.1 surround output. This guide shows how to switch to the correct multichannel profile so the Pulse Audio Stereo Pairs addon can create individual stereo pair sinks for each channel group.
