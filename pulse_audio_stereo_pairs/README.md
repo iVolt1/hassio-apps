@@ -86,3 +86,79 @@ This is useful for confirming which sinks were created and diagnosing any failur
 - `module-suspend-on-idle` is disabled to keep sinks active at all times
 - If a physical audio device is unplugged, its associated remap sinks are automatically removed
 - Restartng the **Pulse Audio Out** provider in MA or restarting MA is necessary to reflect the changes when DACs are added or removed.
+  
+## Setting the mutltichannel HA Audio profile if not already set
+
+# How to Set a Sound Card to Its Multichannel Profile
+
+By default PulseAudio may configure a sound card with a stereo profile even if the hardware supports 5.1 or 7.1 surround output. This guide shows how to switch to the correct multichannel profile so the Pulse Audio Stereo Pairs addon can create individual stereo pair sinks for each channel group.
+
+## Step 1 — List your cards and their current profiles
+
+From an SSH session on your Home Assistant host, run:
+
+```
+ha audio info --raw-json
+```
+
+This returns a JSON object. The `audio.card` array lists every sound card, its available profiles, and which profile is currently active. For example:
+
+```json
+{
+  "name": "alsa_card.pci-0000_03_00.0",
+  "profiles": [
+    { "name": "output:analog-stereo",     "description": "Analog Stereo Output",       "active": false },
+    { "name": "output:analog-surround-51","description": "Analog Surround 5.1 Output", "active": false },
+    { "name": "output:analog-surround-71","description": "Analog Surround 7.1 Output", "active": true  }
+  ]
+}
+```
+
+Note the `name` field of the card and the `name` field of the profile you want to activate.
+
+To see just card names and active profiles in a more readable form:
+
+```
+ha audio info --raw-json | python3 -c "
+import json,sys
+data = json.load(sys.stdin)
+for card in data['data']['audio']['card']:
+    active = next((p['name'] for p in card['profiles'] if p['active']), 'none')
+    print(f\"{card['name']}\n  active: {active}\n\")
+"
+```
+
+## Step 2 — Set the multichannel profile
+
+```
+ha audio profile --card "<card-name>" --name "<profile-name>"
+```
+
+### Examples
+
+Switch the Creative X-Fi (PCI) to 7.1 surround:
+
+```
+ha audio profile \
+  --card "alsa_card.pci-0000_03_00.0" \
+  --name "output:analog-surround-71"
+```
+
+Switch the USB Sound Device (ICUSBAUDIO7D) to 7.1 surround:
+
+```
+ha audio profile \
+  --card "alsa_card.usb-0d8c_USB_Sound_Device-00" \
+  --name "output:analog-surround-71"
+```
+## Step 3 — Verify the change
+
+```
+pactl list sinks short
+```
+
+The sink for the card should now show the correct channel count, for example `s32le 8ch 96000Hz` for a 7.1 card. Restart the Pulse Audio Stereo Pairs addon and the stereo pair sinks will be created from the new multichannel output.
+
+## Making the Profile Permanent
+
+`ha audio profile` changes persist across reboots — Home Assistant OS stores the setting and restores it automatically on startup. No additional configuration is needed.
