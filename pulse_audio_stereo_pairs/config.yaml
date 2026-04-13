@@ -1,9 +1,10 @@
 name: Pulse Audio Stereo Pairs
-version: 0.92
+version: 0.93
 slug: pulse_audio_stereo_pairs
 description: Create Pulse Audio stereo pairs from Surround sound cards
 arch:
   - amd64
+  - aarch64
 map:
   - type: addon_config
     read_only: false

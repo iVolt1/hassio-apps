@@ -29,7 +29,7 @@ Native stereo devices (USB DACs etc.) are also exposed as remap sinks for consis
 ## Requirements
 
 - PulseAudio must be running on the host before this app starts
-- The app is `amd64` only
+- The app is `amd64` and `aarch64` only
 
 ## Installation
 
