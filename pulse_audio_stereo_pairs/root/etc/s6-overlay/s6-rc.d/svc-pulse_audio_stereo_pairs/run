@@ -130,6 +130,37 @@ create_pairs() {
             fi
         done
 
+        # Multi-channel sinks — also create a full passthrough remap sink
+        # for multichannel playback (e.g. 5.1/7.1 direct PCM output).
+        ch_count=$(echo "$full_sink_list" | awk -v target="$sink" '
+            /^[[:space:]]*Name: / {
+                current_sink = $0
+                sub(/^[[:space:]]*Name: /, "", current_sink)
+                found = (current_sink == target)
+                next
+            }
+            found && /^[[:space:]]*Sample Specification:/ {
+                match($0, /[0-9]+ch/)
+                print substr($0, RSTART, RLENGTH-2)
+                exit
+            }
+        ')
+        if [[ "$ch_count" -ge 6 ]] 2>/dev/null; then
+            remap_name="${card}_surround"
+            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" || {
+                log "Creating $remap_name from $sink (${ch_count}ch passthrough)"
+                module_id=$(pactl load-module module-remap-sink \
+                    sink_name="$remap_name" master="$sink" \
+                    sink_properties="device.description=$remap_name" \
+                    channels="$ch_count" \
+                    master_channel_map="$channel_map" \
+                    channel_map="$channel_map" remix=no 2>>"$LOG")
+                [[ "$module_id" =~ ^[0-9]+$ ]] \
+                    && log "Loaded module $module_id for $remap_name" \
+                    || log "Failed to load $remap_name"
+            }
+        fi
+
     done <<< "$sinks"
 
     log "Stereo pair creation pass complete"
