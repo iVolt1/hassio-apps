@@ -1,5 +1,5 @@
 name: Pulse Audio Stereo Pairs
-version: 0.941
+version: 0.942
 slug: pulse_audio_stereo_pairs
 description: Create Pulse Audio stereo pairs from Surround sound cards
 arch:
