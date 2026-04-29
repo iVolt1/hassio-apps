@@ -78,6 +78,25 @@ create_pairs() {
         ')
         [[ -z "$channel_map" ]] && continue
 
+        # Count channels — skip sinks that are already stereo (no remap needed)
+        ch_count=$(echo "$full_sink_list" | awk -v target="$sink" '
+            /^[[:space:]]*Name: / {
+                current_sink = $0
+                sub(/^[[:space:]]*Name: /, "", current_sink)
+                found = (current_sink == target)
+                next
+            }
+            found && /^[[:space:]]*Sample Specification:/ {
+                match($0, /[0-9]+ch/)
+                print substr($0, RSTART, RLENGTH-2)
+                exit
+            }
+        ')
+        if [[ "$ch_count" -le 2 ]] 2>/dev/null; then
+            log "Skipping $sink — already stereo (${ch_count}ch)"
+            continue
+        fi
+
         # S/PDIF sinks — single stereo remap
         if [[ "$sink" =~ \.(iec958-[^.]+)$ ]]; then
             port_name=$(echo "${BASH_REMATCH[1]}" | tr '-' '_')
@@ -132,19 +151,6 @@ create_pairs() {
 
         # Multi-channel sinks — also create a full passthrough remap sink
         # for multichannel playback (e.g. 5.1/7.1 direct PCM output).
-        ch_count=$(echo "$full_sink_list" | awk -v target="$sink" '
-            /^[[:space:]]*Name: / {
-                current_sink = $0
-                sub(/^[[:space:]]*Name: /, "", current_sink)
-                found = (current_sink == target)
-                next
-            }
-            found && /^[[:space:]]*Sample Specification:/ {
-                match($0, /[0-9]+ch/)
-                print substr($0, RSTART, RLENGTH-2)
-                exit
-            }
-        ')
         if [[ "$ch_count" -ge 6 ]] 2>/dev/null; then
             remap_name="${card}_surround"
             echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" || {
