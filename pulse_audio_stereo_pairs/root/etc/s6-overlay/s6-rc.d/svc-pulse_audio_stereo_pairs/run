@@ -5,6 +5,7 @@ set +e
 
 LOG="/config/local_pulse_audio_stereo_pairs/remap_modules.log"
 mkdir -p "$(dirname "$LOG")"
+> "$LOG"  # truncate log at start of each run
 
 log() { echo "$(date) — $*" >> "$LOG"; }
 
