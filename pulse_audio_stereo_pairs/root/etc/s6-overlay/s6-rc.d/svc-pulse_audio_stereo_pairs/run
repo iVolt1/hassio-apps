@@ -233,11 +233,11 @@ reload_card_no_mmap() {
         return
     fi
 
-    # Derive the numeric device_id from the card name
+    # Derive the numeric device_id (card index) — stable across reloads
     local device_id
     device_id=$(pactl list cards | awk -v card="$card_name" '
         /^Card #/ { id=substr($2,2) }
-        /Name:/ && $2==card { print id; exit }
+        /^\t*Name:/ { gsub(/^\t*Name: /,""); if ($0==card) { print id; exit } }
     ')
 
     if [[ -z "$device_id" ]]; then
@@ -245,13 +245,32 @@ reload_card_no_mmap() {
         return
     fi
 
-    log "Reloading $card_name (module $mod_id, device_id=$device_id) with tsched=0 mmap=0"
+    # Capture the active profile by card index before unloading
+    local active_profile
+    active_profile=$(pactl list cards | awk -v id="$device_id" '
+        /^Card #/ { found=($2=="#"id) }
+        found && /Active Profile:/ {
+            sub(/.*Active Profile: /, "")
+            print
+            exit
+        }
+    ')
+
+    log "Reloading $card_name (module $mod_id, device_id=$device_id, profile=$active_profile) with tsched=0 mmap=0"
     pactl unload-module "$mod_id"
+
     local new_mod_id
-    new_mod_id=$(pactl load-module module-alsa-card \
-        device_id="$device_id" tsched=0 mmap=0 2>>"$LOG")
+    if [[ -n "$active_profile" ]]; then
+        new_mod_id=$(pactl load-module module-alsa-card \
+            device_id="$device_id" tsched=0 mmap=0 \
+            profile="$active_profile" 2>>"$LOG")
+    else
+        new_mod_id=$(pactl load-module module-alsa-card \
+            device_id="$device_id" tsched=0 mmap=0 2>>"$LOG")
+    fi
+
     if [[ "$new_mod_id" =~ ^[0-9]+$ ]]; then
-        log "Reloaded $card_name as module $new_mod_id with tsched=0 mmap=0"
+        log "Reloaded $card_name as module $new_mod_id with tsched=0 mmap=0 profile=$active_profile"
     else
         log "ERROR: failed to reload $card_name with tsched=0 mmap=0"
     fi
