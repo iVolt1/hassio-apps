@@ -25,31 +25,15 @@ wait_for_pulse() {
 # Create stereo pair remap sinks for all current physical PA sinks.
 # Skips sinks that are already remap sinks and skips pairs that already exist.
 # Does NOT unload existing remaps — call cleanup_all_remaps first if needed.
-#
-# master_channel_map: which physical channels on the master sink to use
-# channel_map:        always front-left,front-right so writers see a normal
-#                     stereo sink regardless of which physical pair is used
 # ---------------------------------------------------------------------------
 create_pairs() {
     log "Creating stereo pairs..."
 
-    # Physical channel pairs to extract from multi-channel sinks.
-    # Key   = suffix used in the remap sink name
-    # Value = master_channel_map (physical channels on the master sink)
-    declare -A stereo_pairs_master=(
-        ["front_stereo"]="front-left,front-right"
-        ["rear_stereo"]="rear-left,rear-right"
-        ["side_stereo"]="side-left,side-right"
-        ["center_sub"]="front-center,lfe"
-    )
-
-    # channel_map exposed to audio writers — always stereo FL/FR so that
-    # clients (Sendspin etc.) treat every remap sink as a normal stereo sink.
-    declare -A stereo_pairs_chmap=(
-        ["front_stereo"]="front-left,front-right"
-        ["rear_stereo"]="front-left,front-right"
-        ["side_stereo"]="front-left,front-right"
-        ["center_sub"]="front-left,front-right"
+    declare -A stereo_pairs=(
+        ["front_stereo"]="front-left front-right"
+        ["rear_stereo"]="rear-left rear-right"
+        ["side_stereo"]="side-left side-right"
+        ["center_sub"]="front-center lfe"
     )
 
     full_sink_list=$(pactl list sinks)
@@ -148,20 +132,17 @@ create_pairs() {
         fi
 
         # Multi-channel sinks — one remap per channel pair present
-        for pair in "${!stereo_pairs_master[@]}"; do
-            master_map="${stereo_pairs_master[$pair]}"
-            ch_map="${stereo_pairs_chmap[$pair]}"
-            req0="${master_map%%,*}"
-            req1="${master_map##*,}"
-            if [[ "$channel_map" == *"$req0"* && "$channel_map" == *"$req1"* ]]; then
+        for pair in "${!stereo_pairs[@]}"; do
+            required=(${stereo_pairs[$pair]})
+            if [[ "$channel_map" == *"${required[0]}"* && "$channel_map" == *"${required[1]}"* ]]; then
                 remap_name="${card}_${pair}"
                 echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
-                log "Creating $remap_name from $sink (master_channel_map=$master_map channel_map=$ch_map)"
+                log "Creating $remap_name from $sink"
                 module_id=$(pactl load-module module-remap-sink \
                     sink_name="$remap_name" master="$sink" \
                     sink_properties="device.description=$remap_name" \
-                    channels=2 master_channel_map="$master_map" \
-                    channel_map="$ch_map" remix=no 2>>"$LOG")
+                    channels=2 master_channel_map="${required[0]},${required[1]}" \
+                    channel_map="${required[0]},${required[1]}" remix=no 2>>"$LOG")
                 [[ "$module_id" =~ ^[0-9]+$ ]] \
                     && log "Loaded module $module_id for $remap_name" \
                     || log "Failed to load $remap_name"
@@ -214,76 +195,9 @@ cleanup_orphaned_remaps() {
 }
 
 # ---------------------------------------------------------------------------
-# Reload a specific ALSA card module with tsched=0 mmap=0.
-# Required for snd_ctxfi (Creative X-Fi) due to mmap regression in kernel
-# 6.12.x (introduced in HAOS 17.3). PA opens the device successfully in
-# mmap+timer mode but produces no audio; read/write mode works correctly.
-# ---------------------------------------------------------------------------
-reload_card_no_mmap() {
-    local pci_addr="$1"   # e.g. 0000_03_00.0
-    local card_name="alsa_card.pci-${pci_addr}"
-
-    local mod_id
-    mod_id=$(pactl list short modules | awk -v card="$card_name" '
-        /module-alsa-card/ && $0 ~ card { print $1; exit }
-    ')
-
-    if [[ -z "$mod_id" ]]; then
-        log "reload_card_no_mmap: no module-alsa-card found for $card_name — skipping"
-        return
-    fi
-
-    # Derive the numeric device_id (card index) — stable across reloads
-    local device_id
-    device_id=$(pactl list cards | awk -v card="$card_name" '
-        /^Card #/ { id=substr($2,2) }
-        /^\t*Name:/ { gsub(/^\t*Name: /,""); if ($0==card) { print id; exit } }
-    ')
-
-    if [[ -z "$device_id" ]]; then
-        log "reload_card_no_mmap: could not determine device_id for $card_name — skipping"
-        return
-    fi
-
-    # Capture the active profile by card index before unloading
-    local active_profile
-    active_profile=$(pactl list cards | awk -v id="$device_id" '
-        /^Card #/ { found=($2=="#"id) }
-        found && /Active Profile:/ {
-            sub(/.*Active Profile: /, "")
-            print
-            exit
-        }
-    ')
-
-    log "Reloading $card_name (module $mod_id, device_id=$device_id, profile=$active_profile) with tsched=0 mmap=0"
-    pactl unload-module "$mod_id"
-
-    local new_mod_id
-    if [[ -n "$active_profile" ]]; then
-        new_mod_id=$(pactl load-module module-alsa-card \
-            device_id="$device_id" tsched=0 mmap=0 \
-            profile="$active_profile" 2>>"$LOG")
-    else
-        new_mod_id=$(pactl load-module module-alsa-card \
-            device_id="$device_id" tsched=0 mmap=0 2>>"$LOG")
-    fi
-
-    if [[ "$new_mod_id" =~ ^[0-9]+$ ]]; then
-        log "Reloaded $card_name as module $new_mod_id with tsched=0 mmap=0 profile=$active_profile"
-    else
-        log "ERROR: failed to reload $card_name with tsched=0 mmap=0"
-    fi
-}
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 wait_for_pulse || exit 1
-
-# Reload Creative X-Fi with mmap=0 tsched=0 to work around kernel 6.12.x
-# mmap regression (HAOS 17.3). Must run before creating remap sinks.
-reload_card_no_mmap "0000_03_00.0"
 
 # One-time setup on startup
 pactl unload-module module-suspend-on-idle 2>/dev/null || true
