@@ -26,15 +26,30 @@ wait_for_pulse() {
 # Create stereo pair remap sinks for all current physical PA sinks.
 # Skips sinks that are already remap sinks and skips pairs that already exist.
 # Does NOT unload existing remaps — call cleanup_all_remaps first if needed.
+#
+# master_channel_map: which physical channels on the master sink to use
+# channel_map:        always front-left,front-right so writers see a normal
+#                     stereo sink regardless of which physical pair is used
 # ---------------------------------------------------------------------------
 create_pairs() {
     log "Creating stereo pairs..."
 
-    declare -A stereo_pairs=(
-        ["front_stereo"]="front-left front-right"
-        ["rear_stereo"]="rear-left rear-right"
-        ["side_stereo"]="side-left side-right"
-        ["center_sub"]="front-center lfe"
+    # Physical channel pairs to extract from multi-channel sinks.
+    # Value = master_channel_map (physical channels on the master sink)
+    declare -A stereo_pairs_master=(
+        ["front_stereo"]="front-left,front-right"
+        ["rear_stereo"]="rear-left,rear-right"
+        ["side_stereo"]="side-left,side-right"
+        ["center_sub"]="front-center,lfe"
+    )
+
+    # channel_map exposed to audio writers — always stereo FL/FR so that
+    # clients (Sendspin etc.) treat every remap sink as a normal stereo sink.
+    declare -A stereo_pairs_chmap=(
+        ["front_stereo"]="front-left,front-right"
+        ["rear_stereo"]="front-left,front-right"
+        ["side_stereo"]="front-left,front-right"
+        ["center_sub"]="front-left,front-right"
     )
 
     full_sink_list=$(pactl list sinks)
@@ -133,17 +148,20 @@ create_pairs() {
         fi
 
         # Multi-channel sinks — one remap per channel pair present
-        for pair in "${!stereo_pairs[@]}"; do
-            required=(${stereo_pairs[$pair]})
-            if [[ "$channel_map" == *"${required[0]}"* && "$channel_map" == *"${required[1]}"* ]]; then
+        for pair in "${!stereo_pairs_master[@]}"; do
+            master_map="${stereo_pairs_master[$pair]}"
+            ch_map="${stereo_pairs_chmap[$pair]}"
+            req0="${master_map%%,*}"
+            req1="${master_map##*,}"
+            if [[ "$channel_map" == *"$req0"* && "$channel_map" == *"$req1"* ]]; then
                 remap_name="${card}_${pair}"
                 echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
-                log "Creating $remap_name from $sink"
+                log "Creating $remap_name from $sink (master_channel_map=$master_map channel_map=$ch_map)"
                 module_id=$(pactl load-module module-remap-sink \
                     sink_name="$remap_name" master="$sink" \
                     sink_properties="device.description=$remap_name" \
-                    channels=2 master_channel_map="${required[0]},${required[1]}" \
-                    channel_map="${required[0]},${required[1]}" remix=no 2>>"$LOG")
+                    channels=2 master_channel_map="$master_map" \
+                    channel_map="$ch_map" remix=no 2>>"$LOG")
                 [[ "$module_id" =~ ^[0-9]+$ ]] \
                     && log "Loaded module $module_id for $remap_name" \
                     || log "Failed to load $remap_name"
@@ -202,6 +220,13 @@ wait_for_pulse || exit 1
 
 # One-time setup on startup
 pactl unload-module module-suspend-on-idle 2>/dev/null || true
+
+# Unmute all ALSA master sinks — guards against PA restoring a muted state
+for sink in $(pactl list sinks short | awk '/module-alsa-card/ {print $2}'); do
+    pactl set-sink-mute "$sink" 0
+    log "Unmuted $sink"
+done
+
 for id in $(pactl list short modules | awk '/module-remap-sink/ {print $1}'); do
     log "Unloading existing remap module $id"
     pactl unload-module "$id"
