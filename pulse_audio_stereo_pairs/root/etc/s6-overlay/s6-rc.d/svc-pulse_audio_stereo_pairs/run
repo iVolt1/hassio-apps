@@ -221,12 +221,23 @@ wait_for_pulse || exit 1
 # One-time setup on startup
 pactl unload-module module-suspend-on-idle 2>/dev/null || true
 
-# Unmute all ALSA master sinks — guards against PA restoring a muted state
-for sink in $(pactl list sinks short | awk '/module-alsa-card/ {print $2}'); do
+# Suspend/resume all ALSA master sinks to force a clean PCM device reopen.
+# Fixes mmap+timer negotiation failures (known issue with snd_ctxfi on kernel
+# 6.12.x) and ensures correct access mode on all cards. Also unmutes any sink
+# that PA restored in a muted state.
+log "Suspend/resume all ALSA sinks to ensure clean PCM open mode"
+pactl list sinks short | awk '/module-alsa-card/ {print $2}' | while read -r sink; do
+    pactl suspend-sink "$sink" 1
+    log "Suspended $sink"
+done
+sleep 2
+pactl list sinks short | awk '/module-alsa-card/ {print $2}' | while read -r sink; do
+    pactl suspend-sink "$sink" 0
     pactl set-sink-mute "$sink" 0
-    log "Unmuted $sink"
+    log "Resumed and unmuted $sink"
 done
 
+# Unload and recreate all remap sinks against freshly reopened master sinks
 for id in $(pactl list short modules | awk '/module-remap-sink/ {print $1}'); do
     log "Unloading existing remap module $id"
     pactl unload-module "$id"
