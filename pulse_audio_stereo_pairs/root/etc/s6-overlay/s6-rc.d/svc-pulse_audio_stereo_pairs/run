@@ -1,11 +1,32 @@
 #!/bin/bash
-# s6 longrun: manage PulseAudio stereo pair remap sinks.
-# Creates pairs on startup and reacts to physical sink add/remove events.
+# s6 longrun: manage PulseAudio remap-sink topology for multi-channel cards.
+# Creates zone sinks on startup and reacts to physical sink add/remove events.
+#
+# Naming/topology methodology mirrors music-assistant local_audio's
+# remap_topology.py:
+#   - card-name normalization with connector-label and hardware-tag
+#     disambiguation (normalize_card_name / connector_label)
+#   - one stereo zone sink per recognized channel pair present in the
+#     master's channel map (front/rear/side stereo, center+sub)
+#   - one full-passthrough "multichannel_stereo" sink for masters with
+#     6+ channels
+#   - masters with <=2 channels are left alone entirely — no remap sink
+#     is created for them (this is a behavior CHANGE from the previous
+#     version of this script, which created a renamed passthrough remap
+#     for 2-channel HDMI/S-PDIF sinks; remap_topology.py does not do
+#     this, so it's dropped here to match).
+#
+# NOTE: introducing the connector-label/hardware-tag suffixes changes the
+# sink names this script produces (e.g. "HD_Audio_Generic_front_stereo"
+# may become "HD_Audio_Generic_hdmi_a3f9_front_stereo" once a second,
+# previously-unambiguous card is present). Any player/zone config that
+# references the OLD sink names by name will need to be repointed at the
+# new names after this script runs for the first time. Test on a
+# non-production sink-name set before relying on this.
 set +e
 
 LOG="/config/local_pulse_audio_stereo_pairs/remap_modules.log"
 mkdir -p "$(dirname "$LOG")"
-> "$LOG"  # truncate log at start of each run
 
 log() { echo "$(date) — $*" >> "$LOG"; }
 
@@ -23,52 +44,103 @@ wait_for_pulse() {
 }
 
 # ---------------------------------------------------------------------------
-# Create stereo pair remap sinks for all current physical PA sinks.
-# Skips sinks that are already remap sinks and skips pairs that already exist.
-# Does NOT unload existing remaps — call cleanup_all_remaps first if needed.
+# Normalize an alsa.card_name into a sink-name prefix, then append an
+# optional connector label and hardware tag for disambiguation.
+# Mirrors remap_topology.normalize_card_name().
+# ---------------------------------------------------------------------------
+normalize_card_name() {
+    local raw="$1" label="$2" tag="$3"
+    local name
+    name=$(echo "$raw" | tr ' -' '_' | tr -cd '[:alnum:]_')
+    [[ -n "$label" ]] && name="${name}_${label}"
+    [[ -n "$tag" ]] && name="${name}_${tag}"
+    echo "$name"
+}
+
+# ---------------------------------------------------------------------------
+# Derive a short connector-type label ("hdmi", "spdif", "analog", or the
+# lowercased device.bus value). Mirrors remap_topology.connector_label().
+# Distinguishes e.g. an HDMI function and an analog function on the same
+# physical chip that would otherwise share an identical alsa.card_name.
+# ---------------------------------------------------------------------------
+connector_label() {
+    local sink_name_lower="$1" device_bus="$2"
+    if [[ "$sink_name_lower" == *hdmi* ]]; then
+        echo "hdmi"
+    elif [[ "$sink_name_lower" == *iec958* || "$sink_name_lower" == *spdif* ]]; then
+        echo "spdif"
+    elif [[ "$device_bus" == "pci" ]]; then
+        echo "analog"
+    elif [[ -n "$device_bus" ]]; then
+        echo "$device_bus" | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Derive a short, stable hardware tag from the sink's bus path so identical
+# cards get distinct sink-name prefixes. Bus-path derived (not ALSA card
+# index) so it survives reboots regardless of enumeration order. Applied
+# unconditionally to every multi-channel master processed below (not just
+# on detected collision) so a card's sink-name prefix never changes later
+# purely because a second identical card was added.
 #
-# master_channel_map: which physical channels on the master sink to use
-# channel_map:        always front-left,front-right so writers see a normal
-#                     stereo sink regardless of which physical pair is used
+# ASSUMPTION: uses the "device.bus_path" PA property as the hash source.
+# Confirm this property is actually present in `pactl list sinks` output
+# for your cards before relying on this — some drivers/backends may only
+# expose "sysfs.path" or nothing bus-path-like at all, in which case this
+# falls back to the sink name itself (stable, but not survivorship-tested
+# against ALSA card-index churn the way a true bus path would be).
+# ---------------------------------------------------------------------------
+hardware_tag() {
+    local bus_path="$1" fallback="$2"
+    local source="${bus_path:-$fallback}"
+    [[ -z "$source" ]] && return
+    echo -n "$source" | md5sum | cut -c1-4
+}
+
+# ---------------------------------------------------------------------------
+# Create zone remap sinks for all current physical PA sinks with more than
+# 2 channels:
+#   - one stereo zone per recognized channel pair present in the master's
+#     channel map
+#   - one full-passthrough "multichannel_stereo" sink (same channel count
+#     and map as the master) for masters with 6+ channels
+# Masters with <=2 channels are skipped entirely (matches
+# remap_topology.compute_remap_topology(), which returns [] for them).
+# Skips sinks that are already remap sinks and skips zones that already
+# exist. Does NOT unload existing remaps — call cleanup_all_remaps first
+# if needed.
 # ---------------------------------------------------------------------------
 create_pairs() {
-    log "Creating stereo pairs..."
+    log "Creating remap-sink topology..."
 
-    # Physical channel pairs to extract from multi-channel sinks.
-    # Value = master_channel_map (physical channels on the master sink)
-    declare -A stereo_pairs_master=(
-        ["front_stereo"]="front-left,front-right"
-        ["rear_stereo"]="rear-left,rear-right"
-        ["side_stereo"]="side-left,side-right"
-        ["center_sub"]="front-center,lfe"
+    declare -A stereo_pairs=(
+        ["front_stereo"]="front-left front-right"
+        ["rear_stereo"]="rear-left rear-right"
+        ["side_stereo"]="side-left side-right"
+        ["center_sub"]="front-center lfe"
     )
-
-    # channel_map exposed to audio writers — always stereo FL/FR so that
-    # clients (Sendspin etc.) treat every remap sink as a normal stereo sink.
-    declare -A stereo_pairs_chmap=(
-        ["front_stereo"]="front-left,front-right"
-        ["rear_stereo"]="front-left,front-right"
-        ["side_stereo"]="front-left,front-right"
-        ["center_sub"]="front-left,front-right"
-    )
+    local surround_passthrough_min_channels=6
 
     full_sink_list=$(pactl list sinks)
+    current_sinks_short=$(pactl list sinks short)
 
+    # Name + alsa.card_name pairing — same proven technique as before,
+    # unchanged (assumes each sink block has exactly one alsa.card_name
+    # property, in Name-then-property order across the whole listing).
     sinks=$(echo "$full_sink_list" | grep -E 'Name:|alsa.card_name' | sed -n '
         s/.*Name: //p
         s/.*alsa.card_name = "\(.*\)"/\1/p
-    ' | paste - - | while read -r name card; do
-        card_clean=$(echo "$card" | tr ' -' '_' | tr -cd '[:alnum:]_')
-        echo "$name $card_clean"
-    done)
+    ' | paste - -)
 
-    current_sinks_short=$(pactl list sinks short)
-
-    while read -r sink card; do
+    while read -r sink card_name_raw; do
         [[ -z "$sink" ]] && continue
-        [[ -z "$card" ]] && card=$(basename "$sink")
+        [[ -z "$card_name_raw" ]] && card_name_raw=$(basename "$sink")
 
-        # Skip sinks that are already remap sinks
+        # Per-sink lookups, each independently anchored on this sink's own
+        # "Name:" line (same forward-scan-from-Name pattern the old script
+        # already used for Driver — safe even if a property is missing or
+        # out of order for a particular sink).
         driver=$(echo "$full_sink_list" | awk -v target="$sink" '
             /^[[:space:]]*Name: / {
                 current = $0; sub(/^[[:space:]]*Name: /, "", current)
@@ -94,101 +166,86 @@ create_pairs() {
         ')
         [[ -z "$channel_map" ]] && continue
 
-        # Count channels — skip sinks that are already stereo (no remap needed)
-        ch_count=$(echo "$full_sink_list" | awk -v target="$sink" '
+        device_bus=$(echo "$full_sink_list" | awk -v target="$sink" '
             /^[[:space:]]*Name: / {
-                current_sink = $0
-                sub(/^[[:space:]]*Name: /, "", current_sink)
-                found = (current_sink == target)
-                next
+                current = $0; sub(/^[[:space:]]*Name: /, "", current)
+                found = (current == target); next
             }
-            found && /^[[:space:]]*Sample Specification:/ {
-                match($0, /[0-9]+ch/)
-                print substr($0, RSTART, RLENGTH-2)
+            found && /device\.bus = / {
+                match($0, /device\.bus = "[^"]*"/)
+                val = substr($0, RSTART, RLENGTH)
+                gsub(/device\.bus = "|"/, "", val)
+                print val
                 exit
             }
         ')
-        if [[ "$ch_count" -le 2 ]] 2>/dev/null; then
-            log "Skipping $sink — already stereo (${ch_count}ch)"
+
+        bus_path=$(echo "$full_sink_list" | awk -v target="$sink" '
+            /^[[:space:]]*Name: / {
+                current = $0; sub(/^[[:space:]]*Name: /, "", current)
+                found = (current == target); next
+            }
+            found && /device\.bus_path = / {
+                match($0, /device\.bus_path = "[^"]*"/)
+                val = substr($0, RSTART, RLENGTH)
+                gsub(/device\.bus_path = "|"/, "", val)
+                print val
+                exit
+            }
+        ')
+
+        channels=$(echo "$channel_map" | awk -F',' '{print NF}')
+
+        # <=2 channel masters: skip entirely, matching
+        # remap_topology.compute_remap_topology()'s behavior for these.
+        if [[ "$channels" -le 2 ]]; then
             continue
         fi
 
-        # S/PDIF sinks — single stereo remap
-        if [[ "$sink" =~ \.(iec958-[^.]+)$ ]]; then
-            port_name=$(echo "${BASH_REMATCH[1]}" | tr '-' '_')
-            remap_name="${card}_${port_name}"
-            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
-            log "Creating $remap_name from $sink (S/PDIF)"
-            module_id=$(pactl load-module module-remap-sink \
-                sink_name="$remap_name" master="$sink" \
-                sink_properties="device.description=$remap_name" \
-                channels=2 master_channel_map="front-left,front-right" \
-                channel_map="front-left,front-right" remix=no 2>>"$LOG")
-            [[ "$module_id" =~ ^[0-9]+$ ]] \
-                && log "Loaded module $module_id for $remap_name" \
-                || log "Failed to load $remap_name"
-            continue
-        fi
+        sink_lower=$(echo "$sink" | tr '[:upper:]' '[:lower:]')
+        label=$(connector_label "$sink_lower" "$device_bus")
+        tag=$(hardware_tag "$bus_path" "$sink")
+        card=$(normalize_card_name "$card_name_raw" "$label" "$tag")
 
-        # HDMI sinks — single stereo remap
-        if [[ "$sink" =~ \.(hdmi-[^.]+)$ ]]; then
-            port_name=$(echo "${BASH_REMATCH[1]}" | tr '-' '_')
-            remap_name="${card}_${port_name}"
-            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
-            log "Creating $remap_name from $sink (HDMI)"
-            module_id=$(pactl load-module module-remap-sink \
-                sink_name="$remap_name" master="$sink" \
-                sink_properties="device.description=$remap_name" \
-                channels=2 master_channel_map="front-left,front-right" \
-                channel_map="front-left,front-right" remix=no 2>>"$LOG")
-            [[ "$module_id" =~ ^[0-9]+$ ]] \
-                && log "Loaded module $module_id for $remap_name" \
-                || log "Failed to load $remap_name"
-            continue
-        fi
-
-        # Multi-channel sinks — one remap per channel pair present
-        for pair in "${!stereo_pairs_master[@]}"; do
-            master_map="${stereo_pairs_master[$pair]}"
-            ch_map="${stereo_pairs_chmap[$pair]}"
-            req0="${master_map%%,*}"
-            req1="${master_map##*,}"
-            if [[ "$channel_map" == *"$req0"* && "$channel_map" == *"$req1"* ]]; then
-                remap_name="${card}_${pair}"
+        # One zone per recognized channel pair present in the master.
+        for suffix in "${!stereo_pairs[@]}"; do
+            required=(${stereo_pairs[$suffix]})
+            if [[ "$channel_map" == *"${required[0]}"* && "$channel_map" == *"${required[1]}"* ]]; then
+                remap_name="${card}_${suffix}"
                 echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" && continue
-                log "Creating $remap_name from $sink (master_channel_map=$master_map channel_map=$ch_map)"
+                log "Creating $remap_name from $sink"
                 module_id=$(pactl load-module module-remap-sink \
                     sink_name="$remap_name" master="$sink" \
                     sink_properties="device.description=$remap_name" \
-                    channels=2 master_channel_map="$master_map" \
-                    channel_map="$ch_map" remix=no 2>>"$LOG")
+                    channels=2 master_channel_map="${required[0]},${required[1]}" \
+                    channel_map="${required[0]},${required[1]}" remix=no 2>>"$LOG")
                 [[ "$module_id" =~ ^[0-9]+$ ]] \
                     && log "Loaded module $module_id for $remap_name" \
                     || log "Failed to load $remap_name"
             fi
         done
 
-        # Multi-channel sinks — also create a full passthrough remap sink
-        # for multichannel playback (e.g. 5.1/7.1 direct PCM output).
-        if [[ "$ch_count" -ge 6 ]] 2>/dev/null; then
-            remap_name="${card}_surround"
-            echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]" || {
-                log "Creating $remap_name from $sink (${ch_count}ch passthrough)"
+        # Full-passthrough "multichannel_stereo" sink for 6+ channel
+        # masters — same channel count/map as the master, independent
+        # hardware volume control.
+        if [[ "$channels" -ge "$surround_passthrough_min_channels" ]]; then
+            remap_name="${card}_multichannel_stereo"
+            if ! echo "$current_sinks_short" | grep -q "[[:space:]]${remap_name}[[:space:]]"; then
+                log "Creating $remap_name from $sink (full passthrough, ${channels}ch)"
                 module_id=$(pactl load-module module-remap-sink \
                     sink_name="$remap_name" master="$sink" \
                     sink_properties="device.description=$remap_name" \
-                    channels="$ch_count" \
-                    master_channel_map="$channel_map" \
+                    channels="$channels" master_channel_map="$channel_map" \
                     channel_map="$channel_map" remix=no 2>>"$LOG")
                 [[ "$module_id" =~ ^[0-9]+$ ]] \
                     && log "Loaded module $module_id for $remap_name" \
                     || log "Failed to load $remap_name"
-            }
+            fi
         fi
 
     done <<< "$sinks"
 
-    log "Stereo pair creation pass complete"
+    log "Remap-sink topology pass complete"
 }
 
 # ---------------------------------------------------------------------------
@@ -220,24 +277,6 @@ wait_for_pulse || exit 1
 
 # One-time setup on startup
 pactl unload-module module-suspend-on-idle 2>/dev/null || true
-
-# Suspend/resume all ALSA master sinks to force a clean PCM device reopen.
-# Fixes mmap+timer negotiation failures (known issue with snd_ctxfi on kernel
-# 6.12.x) and ensures correct access mode on all cards. Also unmutes any sink
-# that PA restored in a muted state.
-log "Suspend/resume all ALSA sinks to ensure clean PCM open mode"
-pactl list sinks short | awk '/module-alsa-card/ {print $2}' | while read -r sink; do
-    pactl suspend-sink "$sink" 1
-    log "Suspended $sink"
-done
-sleep 2
-pactl list sinks short | awk '/module-alsa-card/ {print $2}' | while read -r sink; do
-    pactl suspend-sink "$sink" 0
-    pactl set-sink-mute "$sink" 0
-    log "Resumed and unmuted $sink"
-done
-
-# Unload and recreate all remap sinks against freshly reopened master sinks
 for id in $(pactl list short modules | awk '/module-remap-sink/ {print $1}'); do
     log "Unloading existing remap module $id"
     pactl unload-module "$id"
