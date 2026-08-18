@@ -1,6 +1,5 @@
 # Pulse Audio Stereo Pair Addon
-ARG BUILD_FROM
-FROM ${BUILD_FROM}
+FROM  ghcr.io/hassio-addons/base/amd64:stable
 
 RUN apk add -U -q --no-cache --no-progress \
     pulseaudio \
