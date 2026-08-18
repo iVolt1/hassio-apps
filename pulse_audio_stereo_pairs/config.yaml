@@ -6,7 +6,7 @@ arch:
   - amd64
   - aarch64
 map:
-  - type: addon_config
+  - type: app_config
     read_only: false
 privileged:
   - SYS_ADMIN
