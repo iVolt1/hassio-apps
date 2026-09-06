@@ -101,9 +101,15 @@ RUN apk add --no-cache \
     ca-certificates
 
 # Diagnostic: confirm exactly what got installed and what soname it
-# provides — this will show directly in the build log.
-RUN apk info -v libconfig-dev libconfig 2>&1 || true
-RUN find / -name 'libconfig.so*' 2>/dev/null || true
+# provides. Deliberately fails the build right after printing, since
+# Supervisor only surfaces full step-by-step RUN output on a failed
+# build, not a successful one -- remove this whole RUN once answered.
+RUN echo "=== DIAGNOSTIC: libconfig version ===" \
+    && apk info -v libconfig-dev libconfig \
+    && echo "=== DIAGNOSTIC: libconfig.so files on disk ===" \
+    && find / -name 'libconfig.so*' \
+    && echo "=== DIAGNOSTIC COMPLETE - forcing failure to surface log ===" \
+    && exit 1
 
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
