@@ -34,7 +34,11 @@
 # into an uninterruptible sleep simply cannot be reached through this
 # binary at all, since no code path ever makes an ALSA ioctl.
 
-ARG BUILD_FROM
+# Base images now publish as multi-platform manifests, so a single
+# unsuffixed tag resolves to the correct architecture automatically —
+# no build.yaml / per-arch mapping needed. See:
+# https://developers.home-assistant.io/blog/2026/04/02/builder-migration/
+ARG BUILD_FROM=ghcr.io/hassio-addons/base:stable
 
 # Stage: Build minimal FFmpeg for Shairport-Sync's --with-ffmpeg (ALAC/AAC
 # decode support)
