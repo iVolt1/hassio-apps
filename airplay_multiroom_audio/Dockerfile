@@ -100,6 +100,11 @@ RUN apk add --no-cache \
     soxr-dev \
     ca-certificates
 
+# Diagnostic: confirm exactly what got installed and what soname it
+# provides — this will show directly in the build log.
+RUN apk info -v libconfig-dev libconfig 2>&1 || true
+RUN find / -name 'libconfig.so*' 2>/dev/null || true
+
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
 RUN git clone --depth=1 --branch 4.3.7 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
