@@ -155,11 +155,11 @@ FROM ${BUILD_FROM} AS base
 # `ffmpeg-libs` packages (redundant with, and possibly conflicting with,
 # the minimal custom-built ffmpeg libs already copied in below).
 #
-# Not fully verified against root/'s actual run scripts: `curl` is kept
-# below as a debugging convenience (not required by the generator script
-# or shairport-sync); `confuse` and `shadow` from the previous image were
-# dropped as unrecognized requirements — re-add either if something in
-# root/ actually needs them.
+# `curl` is kept below as a debugging convenience — not required by the
+# generator script or shairport-sync itself, drop it for the leanest
+# possible image. `confuse` and `shadow` from the previous image were
+# dropped as unrecognized requirements; nothing in this addon (the
+# generator script, or shairport-sync) needs either.
 RUN apk add -U -q --no-cache --no-progress \
     libconfig \
     libpulse \
@@ -173,8 +173,6 @@ RUN apk add -U -q --no-cache --no-progress \
     libstdc++ \
     bash \
     curl
-
-COPY root/ /
 
 # Copy Shairport-Sync (RAOP-only build)
 COPY --from=alpine-builder /tmp/shairport-ap1-install/usr/bin/shairport-sync /usr/bin/shairport-sync
