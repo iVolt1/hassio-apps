@@ -85,7 +85,7 @@ RUN make -j$(nproc) && make install
 # only — no --with-airplay-2, no --with-alsa (see header note above), no
 # --with-convolution (no impulse-response/room-correction feature is used
 # by this addon, so libsndfile isn't needed either).
-FROM alpine:3.20 AS alpine-builder
+FROM ${BUILD_FROM} AS alpine-builder
 RUN apk add --no-cache \
     pulseaudio-dev \
     build-base \
