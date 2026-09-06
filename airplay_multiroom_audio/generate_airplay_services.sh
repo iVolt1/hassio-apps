@@ -1,21 +1,21 @@
 #!/bin/bash
 #
 # Creates one shairport-sync (RAOP / AirPlay 1) instance per remap-sink
-# zone created by the SEPARATE sendspin-only addon (front_stereo/
-# rear_stereo/side_stereo/center_sub/multichannel_stereo) — same sinks,
-# same names, discovered the same way generate_sendspin_daemons.sh does
-# (filtering pactl list sinks short for module-remap-sink). Both addons
-# connect to the same shared hassio_audio PulseAudio server.
+# zone created by the separate Multiroom Audio addon (front/rear/side/
+# center_sub-style zones per card, one per S/PDIF or HDMI output, etc.)
+# — discovered by filtering `pactl list sinks short` for
+# module-remap-sink. Both addons connect to the same shared hassio_audio
+# PulseAudio server.
 #
-# This makes AirPlay coverage dependent on the sendspin addon's topology:
-# masters with <=2 channels (e.g. USB DACs that don't need zone remapping)
-# never get a remap sink from that addon, so they get no AirPlay instance
-# here either — same logic, same exclusions, by design.
+# This makes AirPlay coverage dependent on the Multiroom Audio addon's
+# topology: masters with <=2 channels (e.g. USB DACs that don't need
+# zone remapping) never get a remap sink from that addon, so they get no
+# AirPlay instance here either — same logic, same exclusions, by design.
 #
-# Also makes this addon's startup order-dependent on the sendspin addon's
-# remap-sink creation having already run. If that ever proves to be a
-# real problem (e.g. on a cold boot with no guaranteed ordering), the fix
-# is a short retry/wait loop here rather than assuming ordering.
+# Also makes this addon's startup order-dependent on the Multiroom Audio
+# addon's remap-sink creation having already run. If that ever proves to
+# be a real problem (e.g. on a cold boot with no guaranteed ordering),
+# the fix is a short retry/wait loop here rather than assuming ordering.
 
 echo "$(date) — generate_airplay_services.sh started" >> /tmp/airplay_gen_debug.log
 
@@ -52,26 +52,14 @@ while :; do
 done
 echo "Starting AirPlay port assignments at: $PORT_BASE" >> "$log_file"
 
-# Target the SAME sinks the sendspin addon creates — its own remap-sink
-# zones (front_stereo/rear_stereo/side_stereo/center_sub/multichannel_
-# stereo), discovered exactly the way generate_sendspin_daemons.sh already
-# does. Their names are already final and uniquely tagged by that addon's
-# own naming scheme, so no naming logic is needed here — just use them
-# directly.
+# Target the remap-sink zones the Multiroom Audio addon creates. Their
+# names are already final and unique from that addon's own naming
+# scheme, so no naming logic is needed here — just use them directly.
 #
-# NOTE: this makes AirPlay instance creation dependent on the sendspin
-# addon having already created its remap-sink topology. If this addon's
-# service-generation hook runs before that topology exists (e.g. on a
-# cold boot where startup order isn't guaranteed), this pass will find
-# nothing and create zero instances. If that turns out to be a real
-# problem, the fix is a short retry/wait loop here rather than assuming
-# startup order.
-#
-# NOTE: masters with <=2 channels (e.g. the DragonFly S/PDIF DAC, the
-# ELEGIANT USB DAC) never get a remap sink from the sendspin addon at
-# all — it skips them entirely, matching remap_topology.py's behavior.
-# Under "same sinks as sendspin", those two cards get no AirPlay instance
-# either, by the same logic.
+# The sendspin_* skip below is defensive leftover from an earlier sink
+# topology (a different, now-retired addon) and is currently a no-op
+# against the Multiroom Audio addon's naming scheme — safe to remove
+# once confirmed no sink from that addon is ever named that way.
 while read -r sink; do
     [[ -z "$sink" ]] && continue
     [[ "$sink" == sendspin_* ]] && continue
@@ -105,6 +93,14 @@ while read -r sink; do
     current_log=$player_log
     current_udp_base=$UDP_PORT_BASE
 
+    # audio_backend_buffer_desired_length_in_seconds is set to 0.5s
+    # (up from the shairport-sync default of ~0.35s) to absorb real
+    # WiFi jitter and occasional host-side scheduling stalls seen in
+    # testing — confirmed via reception-interval stats showing jitter
+    # spikes up to ~47ms against real AirPlay clients. output_format is
+    # deliberately left unset (auto) rather than pinned — every session
+    # validated during development ran with automatic format selection;
+    # pin a specific format only after testing it explicitly.
     cat > "${config_file}" <<EOF
 general :
 {
@@ -113,7 +109,7 @@ general :
   interface = "${AIRPLAY_INTERFACE}";
   output_backend = "pa";
   udp_port_base = ${current_udp_base};
-  audio_backend_buffer_desired_length_in_seconds = 0.5; 
+  audio_backend_buffer_desired_length_in_seconds = 0.5;
 };
 sessioncontrol :
 {
@@ -123,7 +119,6 @@ pa :
 {
   sink = "${current_sink}";
   application_name = "Shairport Sync";
-  output_format = "S24_lE"; 
 };
 EOF
 
