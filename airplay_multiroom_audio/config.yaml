@@ -1,5 +1,5 @@
 name:     Airplay Multiroom Audio
-version: "0.101"
+version: "0.1"
 slug:     airplay_multiroom_audio
 description: Create AirPlay 1 receivers from local audio devices, one per physical output
 arch:
