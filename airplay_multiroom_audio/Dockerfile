@@ -100,17 +100,6 @@ RUN apk add --no-cache \
     soxr-dev \
     ca-certificates
 
-# Diagnostic: confirm exactly what got installed and what soname it
-# provides. Deliberately fails the build right after printing, since
-# Supervisor only surfaces full step-by-step RUN output on a failed
-# build, not a successful one -- remove this whole RUN once answered.
-RUN echo "=== DIAGNOSTIC: libconfig version ===" \
-    && apk info -v libconfig-dev libconfig \
-    && echo "=== DIAGNOSTIC: libconfig.so files on disk ===" \
-    && find / -name 'libconfig.so*' \
-    && echo "=== DIAGNOSTIC COMPLETE - forcing failure to surface log ===" \
-    && exit 1
-
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
 RUN git clone --depth=1 --branch 4.3.7 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
