@@ -111,6 +111,7 @@ pa :
   sink = "${current_sink}";
   application_name = "Shairport Sync";
 };
+EOF
 
 cat > "${service_dir}/run" <<EOF
 #!/usr/bin/with-contenv bashio
