@@ -182,7 +182,7 @@ COPY --from=ffmpeglite /ffmpeg_build/lib/*.so* /usr/lib/
 RUN ldconfig /usr/lib 2>/dev/null || true
 
 # Create runtime directories
-RUN mkdir -p /config/dbase_and_logs/shairport-sync
+RUN mkdir -p /config/shairport-sync
 
 # Set up environment for s6-overlay
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
