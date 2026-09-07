@@ -75,7 +75,7 @@ while read -r sink; do
         continue
     fi
 
-     -p "${service_dir}"
+    mkdir -p "${service_dir}"
     echo "longrun" > "${service_dir}/type"
 
     # Re-verify port availability for THIS zone specifically — checking
