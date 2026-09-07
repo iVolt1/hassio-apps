@@ -19,7 +19,7 @@
 
 echo "$(date) — generate_airplay_services.sh started" >> /tmp/airplay_gen_debug.log
 
-log_file="/config/dbase_and_logs/shairport-sync/generate_airplay_services.log"
+log_file="/config/dshairport-sync/generate_airplay_services.log"
 mkdir -p "$(dirname "$log_file")"
 echo "# AirPlay services generated on $(date)" > "$log_file"
 
@@ -29,7 +29,7 @@ is_port_available() {
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
 CONTENTS_DIR="${BASE_DIR}/user/contents.d"
-CONFIG_DIR="/config/dbase_and_logs/shairport-sync/config"
+CONFIG_DIR="/config/shairport-sync/config"
 mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 
 # Explicit network interface for shairport-sync to advertise/bind on.
@@ -66,7 +66,7 @@ while read -r sink; do
 
     friendly_name="$sink"
     service_dir="${BASE_DIR}/airplay-${friendly_name}"
-    player_log="/config/dbase_and_logs/shairport-sync/${friendly_name}.log"
+    player_log="/config//shairport-sync/${friendly_name}.log"
     config_file="${CONFIG_DIR}/${friendly_name}.conf"
 
     if [ -d "$service_dir" ]; then
@@ -75,7 +75,7 @@ while read -r sink; do
         continue
     fi
 
-    mkdir -p "${service_dir}"
+     -p "${service_dir}"
     echo "longrun" > "${service_dir}/type"
 
     # Re-verify port availability for THIS zone specifically — checking
