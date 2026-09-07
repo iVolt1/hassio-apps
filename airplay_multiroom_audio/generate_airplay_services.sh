@@ -109,10 +109,10 @@ sessioncontrol :
 pa :
 {
   sink = "${current_sink}";
-  application_name = "Shairport Sync";};
-EOF
+  application_name = "Shairport Sync";
+};
 
-    cat > "${service_dir}/run" <<EOF
+cat > "${service_dir}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 
 truncate -s 0 "${current_log}"
