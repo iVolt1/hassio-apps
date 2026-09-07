@@ -19,7 +19,7 @@
 
 echo "$(date) — generate_airplay_services.sh started" >> /tmp/airplay_gen_debug.log
 
-log_file="/config/dshairport-sync/generate_airplay_services.log"
+log_file="/config/shairport-sync/generate_airplay_services.log"
 mkdir -p "$(dirname "$log_file")"
 echo "# AirPlay services generated on $(date)" > "$log_file"
 
