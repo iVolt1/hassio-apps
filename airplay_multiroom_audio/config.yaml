@@ -1,12 +1,12 @@
 name:     Airplay Multiroom Audio
-version: "0.1"
+version: "0.11"
 slug:     airplay_multiroom_audio
 description: Create AirPlay 1 receivers from local audio devices, one per physical output
 arch:
   - amd64
   - aarch64
 map:
-  - config:rw
+  - addon_config:rw
 host_network: true
 audio: true
 init: false
