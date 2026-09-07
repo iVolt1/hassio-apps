@@ -113,7 +113,7 @@ pa :
 };
 EOF
 
-cat > "${service_dir}/run" <<EOF
+    cat > "${service_dir}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 
 truncate -s 0 "${current_log}"
