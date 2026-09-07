@@ -93,14 +93,6 @@ while read -r sink; do
     current_log=$player_log
     current_udp_base=$UDP_PORT_BASE
 
-    # audio_backend_buffer_desired_length_in_seconds is set to 0.5s
-    # (up from the shairport-sync default of ~0.35s) to absorb real
-    # WiFi jitter and occasional host-side scheduling stalls seen in
-    # testing — confirmed via reception-interval stats showing jitter
-    # spikes up to ~47ms against real AirPlay clients. output_format is
-    # deliberately left unset (auto) rather than pinned — every session
-    # validated during development ran with automatic format selection;
-    # pin a specific format only after testing it explicitly.
     cat > "${config_file}" <<EOF
 general :
 {
@@ -109,7 +101,6 @@ general :
   interface = "${AIRPLAY_INTERFACE}";
   output_backend = "pa";
   udp_port_base = ${current_udp_base};
-  audio_backend_buffer_desired_length_in_seconds = 0.5;
 };
 sessioncontrol :
 {
