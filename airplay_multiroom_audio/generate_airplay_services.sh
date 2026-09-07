@@ -19,7 +19,7 @@
 
 echo "$(date) — generate_airplay_services.sh started" >> /tmp/airplay_gen_debug.log
 
-log_file="/config/shairport-sync/generate_airplay_services.log"
+log_file="/config/shairport-sync/logs/generate_airplay_services.log"
 mkdir -p "$(dirname "$log_file")"
 echo "# AirPlay services generated on $(date)" > "$log_file"
 
@@ -66,7 +66,7 @@ while read -r sink; do
 
     friendly_name="$sink"
     service_dir="${BASE_DIR}/airplay-${friendly_name}"
-    player_log="/config//shairport-sync/${friendly_name}.log"
+    player_log="/config/shairport-sync/logs/${friendly_name}.log"
     config_file="${CONFIG_DIR}/${friendly_name}.conf"
 
     if [ -d "$service_dir" ]; then
