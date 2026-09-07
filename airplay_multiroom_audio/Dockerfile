@@ -42,7 +42,7 @@ ARG BUILD_FROM=ghcr.io/hassio-addons/base:stable
 
 # Stage: Build minimal FFmpeg for Shairport-Sync's --with-ffmpeg (ALAC/AAC
 # decode support)
-FROM alpine:3.20 AS ffmpeglite
+FROM alpine:3.24 AS ffmpeglite
 ARG FFMPEG_BRANCH=release/7.1
 RUN apk -U add \
     build-base \
