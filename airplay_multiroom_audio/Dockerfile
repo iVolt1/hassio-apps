@@ -102,7 +102,8 @@ RUN apk add --no-cache \
 
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
-RUN git clone --depth=1 --branch 5.6-dev https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
+RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
+    git switch development && \
     cd shairport-sync-ap1 && \
     autoreconf -fi && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure \
