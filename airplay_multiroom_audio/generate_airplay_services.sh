@@ -99,14 +99,14 @@ general :
   name = "${current_name}";
   port = ${current_port};
   interface = "${AIRPLAY_INTERFACE}";
-  output_backend = "pa";
+  output_backend = "pulseaudio";
   udp_port_base = ${current_udp_base};
 };
 sessioncontrol :
 {
   allow_session_interruption = "yes";
 };
-pa :
+pulseaudio :
 {
   sink = "${current_sink}";
   application_name = "Shairport Sync";
