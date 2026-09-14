@@ -102,7 +102,7 @@ RUN apk add --no-cache \
 
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
-RUN git clone --depth=1 --branch 4.3.7 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
+RUN git clone --depth=1 --branch 5.5.1 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
     cd shairport-sync-ap1 && \
     autoreconf -fi && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure \
@@ -112,12 +112,10 @@ RUN git clone --depth=1 --branch 4.3.7 https://github.com/mikebrady/shairport-sy
         --with-pa \
         --with-soxr \
         --with-ffmpeg \
-        --with-metadata \
         --without-avahi \
         --without-dns-sd \
         --with-tinysvcmdns \
-        --with-ssl=openssl \
-        --with-stdout && \
+        --with-ssl=openssl  && \
     make -j$(nproc) && \
     strip shairport-sync && \
     make install DESTDIR=/tmp/shairport-ap1-install
