@@ -109,9 +109,9 @@ sessioncontrol :
 pa :
 {
   sink = "${current_sink}";
-  application_name = "Shairport Sync";ystem log.
-  //output_rate = "192000";
-  //output_format = "S32_LE";
+  application_name = "Shairport Sync";
+  // output_rate = "192000";
+  // output_format = "S32_LE";
 };
 EOF
 
