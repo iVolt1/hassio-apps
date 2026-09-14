@@ -103,14 +103,13 @@ RUN apk add --no-cache \
 WORKDIR /tmp
 COPY --from=ffmpeglite /ffmpeg_build /usr/local
 RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap1 && \
-    git switch development && \
     cd shairport-sync-ap1 && \
+    git switch development && \
     autoreconf -fi && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure \
         --prefix=/usr \
         --with-pipe \
         --with-pulseaudio \
-        --with-pa \
         --with-soxr \
         --with-ffmpeg \
         --without-avahi \
