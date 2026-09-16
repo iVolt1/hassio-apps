@@ -119,6 +119,7 @@ RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2
     git switch development && \
     autoreconf -fi && \
     ./configure \
+        --prefix=/usr \
         --sysconfdir=/etc \
         --with-soxr \
         --with-avahi \
