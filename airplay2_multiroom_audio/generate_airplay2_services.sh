@@ -104,8 +104,8 @@ fi
 AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 echo "Using network interface: ${AIRPLAY_INTERFACE}" >> "$log_file"
 
-PORT_BASE=5120
-UDP_PORT_BASE=7001
+PORT_BASE=7120
+UDP_PORT_BASE=7501
 while :; do
     is_port_available "$PORT_BASE" && break
     PORT_BASE=$((PORT_BASE + 1))
@@ -165,6 +165,7 @@ general :
   output_backend = "pulseaudio";
   udp_port_base = ${current_udp_base};
   mdns_backend = "avahi";
+  interpolation = "soxr";
 };
 sessioncontrol :
 {
