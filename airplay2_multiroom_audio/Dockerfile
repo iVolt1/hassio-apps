@@ -110,6 +110,7 @@ RUN apk add --no-cache \
     util-linux-dev \
     ffmpeg-dev \
     xxd \
+    libplist-util \
     ca-certificates
 
 WORKDIR /tmp
