@@ -59,7 +59,7 @@ RUN git clone https://github.com/mikebrady/nqptp.git && \
     cd nqptp && \
     git switch development && \
     autoreconf -fi && \
-    ./configure && \
+    CFLAGS="-DCONFIG_FOR_LINUX" ./configure && \
     make -j$(nproc) && \
     make install DESTDIR=/tmp/nqptp-install
 
@@ -106,7 +106,8 @@ RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2
         --with-avahi \
         --with-ssl=openssl \
         --with-airplay-2 \
-        --with-pulseaudio && \
+        --with-pulseaudio \
+        CFLAGS="-DCONFIG_FOR_LINUX" && \
     make -j$(nproc) && \
     strip shairport-sync && \
     make install DESTDIR=/tmp/shairport-ap2-install
