@@ -93,7 +93,6 @@ RUN apk add --no-cache \
     util-linux-dev \
     ffmpeg-dev \
     xxd \
-    libplist-utils \
     ca-certificates
 
 WORKDIR /tmp
@@ -145,7 +144,7 @@ RUN apk add -U -q --no-cache --no-progress \
     avahi \
     dbus \
     libplist \
-    libplist-utils \
+    libplist-util \
     libsodium \
     libgcrypt \
     util-linux \
