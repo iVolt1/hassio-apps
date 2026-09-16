@@ -70,7 +70,14 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
     touch "${AVAHI_SERVICE}/dependencies.d/airplay2-dbus"
     cat > "${AVAHI_SERVICE}/run" <<'EOF'
 #!/usr/bin/with-contenv bashio
-exec avahi-daemon --no-drop-root -D --no-chroot -s
+# Deliberately no -D: that flag daemonizes (forks to background and lets
+# the parent exit), which is wrong under s6 — s6 supervises the exact
+# process it execs and expects it to stay in the foreground. With -D,
+# s6 sees the immediate parent exit, treats it as a crash, and restarts
+# the service — but the actual backgrounded child from the previous
+# attempt is still alive holding the PID file, so every restart just
+# hits "Daemon already running on PID N" and loops forever.
+exec avahi-daemon --no-drop-root --no-chroot -s
 EOF
     chmod +x "${AVAHI_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-avahi"
