@@ -46,6 +46,22 @@ ARG BUILD_FROM=ghcr.io/hassio-addons/base:stable
 # One instance runs per zone; shairport-sync talks to it over shared
 # memory, not over the network, so it must be present and running
 # locally, unlike anything in the AP1 image.
+#
+# Two musl-specific build fixes below, both confirmed against actual
+# compiler output (not guessed from a truncated "compilation
+# terminated." trailer — that line alone never names the real problem):
+#   1. CFLAGS="-DCONFIG_FOR_LINUX" — nqptp's configure.ac only sets this
+#      itself for a *-*-linux-gnu* host triple; musl reports as
+#      x86_64-pc-linux-musl, so the Linux-specific code path (which is
+#      still exactly what's needed here) silently never gets enabled
+#      without forcing it.
+#   2. The sed patch — even with CONFIG_FOR_LINUX correctly defined,
+#      nqptp-utilities.c includes <linux/if_packet.h> for struct
+#      sockaddr_ll. That's glibc's path; musl doesn't ship it at all,
+#      even with linux-headers installed. musl (and glibc, for that
+#      matter) exposes the identical struct through <netpacket/packet.h>
+#      instead, so swapping the include is safe on both libcs, not just
+#      a musl workaround.
 FROM ${BUILD_FROM} AS nqptp-builder
 RUN apk add --no-cache \
     build-base \
@@ -58,6 +74,7 @@ WORKDIR /tmp
 RUN git clone https://github.com/mikebrady/nqptp.git && \
     cd nqptp && \
     git switch development && \
+    sed -i 's|#include <linux/if_packet.h>|#include <netpacket/packet.h>|' nqptp-utilities.c && \
     autoreconf -fi && \
     CFLAGS="-DCONFIG_FOR_LINUX" ./configure && \
     make -j$(nproc) && \
