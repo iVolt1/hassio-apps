@@ -29,17 +29,16 @@
 # intended zone. Update that script before relying on this image.
 #
 # IMPORTANT — nqptp + avahi/D-Bus are new requirements the AP1 image
-# doesn't have: AP2 needs one running nqptp per zone (shared-memory
-# interface name derived from the instance name, e.g. /nqptp-LivingRoom)
-# and a real avahi-daemon backed by a live D-Bus system bus — not just
-# the binaries installed. Getting `avahi-daemon` to start cleanly inside
-# a bare container needs, in order: a D-Bus system bus up first
-# (`mkdir -p /run/dbus`, a machine-id, `dbus-daemon --system --fork`),
-# *then* `avahi-daemon --no-drop-root -D`. This Dockerfile installs the
-# packages and directories for that; wiring it up as s6 longrun services
-# (alongside whatever generates the per-zone shairport-sync + nqptp
-# services) still needs to be written against this addon's actual rootfs
-# layout — see the note near the bottom of this file.
+# doesn't have. nqptp is a SINGLE system-wide process, not one per zone
+# — it's the only thing that can bind the privileged UDP 319/320 ports
+# on the whole host, and each shairport-sync instance just registers its
+# own named shared-memory interface (e.g. /nqptp-LivingRoom) with that
+# one running process. A real avahi-daemon, backed by a live D-Bus
+# system bus, is also required — not just the binaries installed.
+# generate_airplay2_services.sh creates all three (dbus, avahi, nqptp)
+# as one-time s6 longrun services and wires every per-zone shairport-
+# sync service to depend on them via s6-rc dependencies.d entries, so
+# start order is enforced rather than hoped for.
 
 ARG BUILD_FROM=ghcr.io/hassio-addons/base:stable
 
@@ -171,27 +170,9 @@ RUN mkdir -p /config/shairport-sync /run/dbus
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV S6_KEEP_ENV=1
 
-# --- NOT YET WIRED UP ---
-# The AP1 image only needs one s6 hook: generate_airplay_services.sh,
-# which creates one shairport-sync longrun per zone. AP2 needs that
-# PLUS three more things running continuously and in the right order —
-# none of which existed in the AP1 image, so none of it is copied in
-# here yet:
-#   1. A dbus-daemon --system longrun (must be up before avahi-daemon)
-#   2. An avahi-daemon --no-drop-root -D longrun (must be up before any
-#      shairport-sync instance tries to register)
-#   3. One nqptp longrun per zone (must be up before that zone's
-#      shairport-sync instance starts, since it depends on nqptp's
-#      shared-memory interface existing)
-#
-# generate_airplay_services.sh itself likely also needs updating for
-# AP2 — beyond adding the nqptp service per zone, check whether it's
-# still passing `-- -d <sink>` (see the sink-selection warning in the
-# header) instead of writing a config file with `pa { sink = ...; }`.
-#
-# COPY generate_airplay_services.sh /usr/sbin/generate_airplay_services.sh
-# RUN chmod +x /usr/sbin/generate_airplay_services.sh
-# ENV S6_STAGE2_HOOK=/usr/sbin/generate_airplay_services.sh
+COPY generate_airplay2_services.sh /usr/sbin/generate_airplay2_services.sh
+RUN chmod +x /usr/sbin/generate_airplay2_services.sh
+ENV S6_STAGE2_HOOK=/usr/sbin/generate_airplay2_services.sh
 
 # Cleanup to reduce image size
 RUN rm -rf /usr/share/man /usr/share/doc /usr/share/info /var/cache/apk/* /tmp/* /usr/share/locale/*
