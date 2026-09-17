@@ -13,6 +13,11 @@ CONTENTS_DIR="${BASE_DIR}/user/contents.d"
 CONFIG_DIR="/config/shairport-sync/config"
 mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 
+# Needed early (before the avahi service block below) so avahi-daemon can
+# be restricted to this interface at startup — see the airplay2-avahi
+# service comment for why that restriction matters.
+AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
+
 # --- Persistent name -> port map ---------------------------------------
 # /etc/s6-overlay/s6-rc.d does NOT survive a container restart, so the
 # "service dir already exists, reuse its port" check below can never
@@ -68,12 +73,27 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
     mkdir -p "$AVAHI_SERVICE" "${AVAHI_SERVICE}/dependencies.d"
     echo "longrun" > "${AVAHI_SERVICE}/type"
     touch "${AVAHI_SERVICE}/dependencies.d/airplay2-dbus"
-    cat > "${AVAHI_SERVICE}/run" <<'EOF'
+    cat > "${AVAHI_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 # Deliberately no -D: that flag daemonizes/forks, which s6 (expecting a
 # foreground process) interprets as an immediate crash-and-restart, while
 # the actual backgrounded child from the prior attempt stays alive holding
 # the PID file, producing an infinite "Daemon already running" loop.
+#
+# Restrict avahi-daemon to the real LAN interface. Under host_network:true
+# this container sees every interface on the host, not just ${AIRPLAY_INTERFACE}
+# — the hassio bridge, docker0, and one veth pair per other addon container
+# on this host. Left unrestricted, avahi-daemon listens and publishes on
+# all of them, and multicast reflected across the hassio bridge between
+# veth peers can make avahi see its own announcement echoed back as if
+# from a rival host, producing a perpetual, never-resolving "needs a
+# rename" collision loop against its own name.
+awk -v iface="${AIRPLAY_INTERFACE}" '
+    /^allow-interfaces=/ { next }
+    /^\[server\]/ { print; print "allow-interfaces=" iface; next }
+    { print }
+' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
+    mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
 exec avahi-daemon --no-drop-root --no-chroot -s
 EOF
     chmod +x "${AVAHI_SERVICE}/run"
@@ -91,8 +111,6 @@ EOF
     chmod +x "${NQPTP_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-nqptp"
 fi
-
-AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 
 PORT_BASE=5120
 UDP_PORT_BASE=7001
