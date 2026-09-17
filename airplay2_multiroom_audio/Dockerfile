@@ -46,10 +46,10 @@ RUN mkdir -p /config/shairport-sync /run/dbus
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV S6_KEEP_ENV=1
 COPY generate_airplay2_services.sh /usr/sbin/generate_airplay2_services.sh
-COPY generate_owntone_pipe_service.sh /usr/sbin/generate_owntone_pipe_service.sh
+COPY generate_castbridge_pipe_services.sh /usr/sbin/generate_castbridge_pipe_services.sh
 COPY run_stage2_hooks.sh /usr/sbin/run_stage2_hooks.sh
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
-             /usr/sbin/generate_owntone_pipe_service.sh \
+             /usr/sbin/generate_castbridge_pipe_services.sh \
              /usr/sbin/run_stage2_hooks.sh
 ENV S6_STAGE2_HOOK=/usr/sbin/run_stage2_hooks.sh
 RUN rm -rf /usr/share/man /usr/share/doc /usr/share/info /var/cache/apk/* /tmp/* /usr/share/locale/*
