@@ -1,5 +1,4 @@
-ARG BUILD_FROM
-FROM ${BUILD_FROM} AS nqptp-builder
+FROM ghcr.io/home-assistant/base:latest AS nqptp-builder
 RUN apk add --no-cache build-base git autoconf automake libtool pkgconfig
 WORKDIR /tmp
 RUN git clone https://github.com/mikebrady/nqptp.git && \
@@ -11,7 +10,7 @@ RUN git clone https://github.com/mikebrady/nqptp.git && \
     make -j$(nproc) && \
     make install DESTDIR=/tmp/nqptp-install
 
-FROM ${BUILD_FROM} AS alpine-builder
+FROM ghcr.io/home-assistant/base:latest AS alpine-builder
 RUN apk add --no-cache \
     build-base git autoconf automake libtool pkgconfig \
     libconfig-dev popt-dev openssl-dev soxr-dev pulseaudio-dev \
@@ -36,7 +35,7 @@ RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2
     strip shairport-sync && \
     make install DESTDIR=/tmp/shairport-ap2-install
 
-FROM ${BUILD_FROM} AS base
+FROM ghcr.io/home-assistant/base:latest AS base
 RUN apk add -U -q --no-cache --no-progress \
     libconfig popt soxr openssl pulseaudio pulseaudio-utils \
     avahi dbus libplist libplist-util libsodium libgcrypt \
