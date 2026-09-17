@@ -12,11 +12,21 @@
 #
 # --- Config-driven, multi-zone (generalized from the single hardcoded
 # OwnTone instance) ---------------------------------------------------
-# Zones are read from a small config file, one "<name> <fifo_path>" pair
-# per line (whitespace-separated, name has no spaces). Blank lines and
-# lines starting with # are ignored.
+# Zones are read from a small config file, one
+# "<name> <fifo_path> [output_rate] [output_format]" line per line
+# (whitespace-separated, name has no spaces). rate/format are optional
+# and default to 44100 / S16_LE (see below) if omitted. Blank lines
+# and lines starting with # are ignored.
 #
 #   PIPE_ZONES_FILE="${CONFIG_DIR}/pipe_zones.txt"
+#
+# The output_rate/output_format defaults matter: shairport-sync's
+# AirPlay 2 pipe backend otherwise defaults to 48000, which OwnTone's
+# pipe input doesn't handle well — explicitly forcing 44100/S16_LE is
+# what actually fixed OwnTone playback from this pipe. A future
+# Cast Bridge zone that wants to match Chromecast's native 48000 rate
+# (to skip ffmpeg resampling) can override this per-line, e.g.:
+#   CastKitchen /media/music/castkitchenpipe 48000 S16_LE
 #
 # On first run (file doesn't exist yet), the file is seeded with a
 # single default entry built from the legacy OWNTONE_AIRPLAY_NAME /
@@ -67,9 +77,11 @@ if [ ! -f "${PIPE_ZONES_FILE}" ]; then
     default_name="${OWNTONE_AIRPLAY_NAME:-OwnTone}"
     default_pipe="${OWNTONE_PIPE_PATH:-/media/music/owntonepipe}"
     cat > "${PIPE_ZONES_FILE}" <<EOF
-# One pipe-output AirPlay 2 zone per line: <name> <fifo_path>
+# One pipe-output AirPlay 2 zone per line:
+#   <name> <fifo_path> [output_rate] [output_format]
+# rate/format default to 44100 / S16_LE if omitted.
 # Blank lines and lines starting with # are ignored.
-${default_name} ${default_pipe}
+${default_name} ${default_pipe} 44100 S16_LE
 EOF
     echo "Seeded default pipe zone: ${default_name} -> ${default_pipe}" >> "$log_file"
 fi
@@ -82,10 +94,12 @@ PORT_BASE=5100
 UDP_PORT_BASE=6500
 
 zone_count=0
-while read -r zone_name zone_pipe; do
+while read -r zone_name zone_pipe zone_rate zone_format; do
     [[ -z "$zone_name" ]] && continue
     [[ "$zone_name" == \#* ]] && continue
     [[ -z "$zone_pipe" ]] && { echo "Skipping malformed line for '${zone_name}' (no fifo path)" >> "$log_file"; continue; }
+    zone_rate="${zone_rate:-44100}"
+    zone_format="${zone_format:-S16_LE}"
 
     zone_count=$((zone_count + 1))
     service_dir="${BASE_DIR}/airplay2-${zone_name}"
@@ -141,6 +155,8 @@ sessioncontrol :
 pipe :
 {
   name = "${zone_pipe}";
+  output_rate = ${zone_rate};
+  output_format = "${zone_format}";
 };
 EOF
 
@@ -158,7 +174,7 @@ EOF
     chmod +x "${service_dir}/run"
     touch "${CONTENTS_DIR}/airplay2-${zone_name}"
 
-    echo "Created: airplay2-${zone_name} -> pipe ${zone_pipe} on port ${current_port}" >> "$log_file"
+    echo "Created: airplay2-${zone_name} -> pipe ${zone_pipe} on port ${current_port} (${zone_rate} ${zone_format})" >> "$log_file"
 done < <(grep -v '^\s*#' "${PIPE_ZONES_FILE}" | grep -v '^\s*$')
 
 echo "Total pipe zones processed: ${zone_count}" >> "$log_file"
