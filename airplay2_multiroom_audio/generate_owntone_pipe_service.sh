@@ -1,21 +1,37 @@
 #!/bin/bash
 #
-# Creates a single, fixed AirPlay 2 receiver whose output is raw PCM
-# written to a named pipe, for OwnTone (forked-daapd) to consume as a
-# "pipe" input source — instead of a PulseAudio sink like the dynamic
-# per-zone instances in generate_airplay2_services.sh.
-#
-# Deliberately kept as its own script/service rather than folded into
-# that per-sink loop: it isn't tied to a PulseAudio remap sink at all,
-# and keeping it separate leaves room to later drive it from its own
-# addon config options (enable/disable, instance name, pipe path)
-# without touching the dynamic generator.
+# Creates one or more fixed AirPlay 2 receivers whose output is raw PCM
+# written to a named pipe — for OwnTone (forked-daapd), or any future
+# "Cast Bridge" addon FIFO consumer, to read as a pipe input source.
+# Deliberately kept separate from generate_airplay2_services.sh's dynamic
+# per-PulseAudio-sink loop: these zones aren't tied to a remap sink at
+# all, and keeping this generator separate leaves room to eventually
+# drive it from its own addon config options.
 #
 # No metadata pipe is set up for now (raw audio only).
+#
+# --- Config-driven, multi-zone (generalized from the single hardcoded
+# OwnTone instance) ---------------------------------------------------
+# Zones are read from a small config file, one "<name> <fifo_path>" pair
+# per line (whitespace-separated, name has no spaces). Blank lines and
+# lines starting with # are ignored.
+#
+#   PIPE_ZONES_FILE="${CONFIG_DIR}/pipe_zones.txt"
+#
+# On first run (file doesn't exist yet), the file is seeded with a
+# single default entry built from the legacy OWNTONE_AIRPLAY_NAME /
+# OWNTONE_PIPE_PATH env vars (or their hardcoded defaults), so existing
+# deployments keep working with zero config changes. To add more pipe
+# zones later (e.g. one per future Cast Bridge target), just add more
+# lines to pipe_zones.txt and restart the addon — each gets its own s6
+# service, its own shairport-sync "pipe" backend config, and its own
+# port persisted in the same port_map.txt used by
+# generate_airplay2_services.sh, so device IDs stay stable across
+# restarts exactly the same way the per-sink zones do.
 
 log_file="/config/shairport-sync/logs/generate_owntone_pipe_service.log"
 mkdir -p "$(dirname "$log_file")"
-echo "# OwnTone pipe AirPlay 2 service generated on $(date)" > "$log_file"
+echo "# Pipe-output AirPlay 2 services generated on $(date)" > "$log_file"
 
 is_port_available() {
     ss -tuln | grep -q ":$1 " && return 1 || return 0
@@ -26,9 +42,9 @@ CONTENTS_DIR="${BASE_DIR}/user/contents.d"
 CONFIG_DIR="/config/shairport-sync/config"
 mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 
-# Shares the same persisted port map generate_airplay2_services.sh uses,
-# keyed by instance name, so this zone's AirPlay 2 device ID is just as
-# stable across restarts as the dynamic per-sink ones.
+# Shared with generate_airplay2_services.sh — same file, same format
+# (name<space>port per line), so pipe zones and PulseAudio-sink zones
+# never fight over a port a name has already been assigned.
 PORT_MAP_FILE="${CONFIG_DIR}/port_map.txt"
 touch "${PORT_MAP_FILE}"
 
@@ -46,59 +62,72 @@ set_mapped_port() {
 
 AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 
-# Overridable via env for now; addon-options-driven config can replace
-# these later without changing anything else in this script.
-OWNTONE_NAME="${OWNTONE_AIRPLAY_NAME:-OwnTone_Pipe}"
-OWNTONE_PIPE="${OWNTONE_PIPE_PATH:-/media/music/owntonepipe}"
-
-service_dir="${BASE_DIR}/airplay2-${OWNTONE_NAME}"
-player_log="/config/shairport-sync/logs/${OWNTONE_NAME}-ap2.log"
-config_file="${CONFIG_DIR}/${OWNTONE_NAME}-ap2.conf"
-
-mkdir -p "$(dirname "${OWNTONE_PIPE}")"
-[ -p "${OWNTONE_PIPE}" ] || mkfifo "${OWNTONE_PIPE}"
-
-if [ -d "$service_dir" ]; then
-    echo "Service already exists: airplay2-${OWNTONE_NAME}" >> "$log_file"
-    exit 0
+PIPE_ZONES_FILE="${CONFIG_DIR}/pipe_zones.txt"
+if [ ! -f "${PIPE_ZONES_FILE}" ]; then
+    default_name="${OWNTONE_AIRPLAY_NAME:-OwnTone}"
+    default_pipe="${OWNTONE_PIPE_PATH:-/media/music/owntonepipe}"
+    cat > "${PIPE_ZONES_FILE}" <<EOF
+# One pipe-output AirPlay 2 zone per line: <name> <fifo_path>
+# Blank lines and lines starting with # are ignored.
+${default_name} ${default_pipe}
+EOF
+    echo "Seeded default pipe zone: ${default_name} -> ${default_pipe}" >> "$log_file"
 fi
 
-mkdir -p "${service_dir}" "${service_dir}/dependencies.d"
-echo "longrun" > "${service_dir}/type"
-# These one-time services are created by generate_airplay2_services.sh,
-# which run_stage2_hooks.sh runs before this script.
-touch "${service_dir}/dependencies.d/airplay2-dbus"
-touch "${service_dir}/dependencies.d/airplay2-avahi"
-touch "${service_dir}/dependencies.d/airplay2-nqptp"
-
-# Fixed, out-of-range starting point so this singleton instance never
-# collides with the dynamic per-sink range (5120+) in the other script.
-PORT_BASE=5119
-mapped_port="$(get_mapped_port "$OWNTONE_NAME")"
-if [[ -n "$mapped_port" ]] && is_port_available "$mapped_port"; then
-    current_port="$mapped_port"
-    echo "Reusing persisted port ${current_port} for ${OWNTONE_NAME}" >> "$log_file"
-else
-    if [[ -n "$mapped_port" ]]; then
-        echo "Persisted port ${mapped_port} for ${OWNTONE_NAME} is no longer free, reassigning" >> "$log_file"
-    fi
-    while ! is_port_available "$PORT_BASE"; do
-        PORT_BASE=$((PORT_BASE + 1))
-    done
-    current_port=$PORT_BASE
-    set_mapped_port "$OWNTONE_NAME" "$current_port"
-    echo "Assigned new port ${current_port} for ${OWNTONE_NAME}" >> "$log_file"
-fi
-
-# Also fixed/out-of-range vs. both the AP2 (7001+) and AP1 (6001+) dynamic
-# udp_port_base ranges, since a single instance doesn't need the
-# probing loop the per-sink scripts use.
+# Separate, lower port range than generate_airplay2_services.sh's
+# dynamic per-sink loop (which starts at 5120), so the two generators
+# never race for the same starting port. Actual collisions are still
+# guarded by is_port_available()/port_map.txt regardless.
+PORT_BASE=5100
 UDP_PORT_BASE=6500
 
-cat > "${config_file}" <<EOF
+zone_count=0
+while read -r zone_name zone_pipe; do
+    [[ -z "$zone_name" ]] && continue
+    [[ "$zone_name" == \#* ]] && continue
+    [[ -z "$zone_pipe" ]] && { echo "Skipping malformed line for '${zone_name}' (no fifo path)" >> "$log_file"; continue; }
+
+    zone_count=$((zone_count + 1))
+    service_dir="${BASE_DIR}/airplay2-${zone_name}"
+    player_log="/config/shairport-sync/logs/${zone_name}-ap2.log"
+    config_file="${CONFIG_DIR}/${zone_name}-ap2.conf"
+
+    mkdir -p "$(dirname "${zone_pipe}")"
+    [ -p "${zone_pipe}" ] || mkfifo "${zone_pipe}"
+
+    if [ -d "$service_dir" ]; then
+        echo "Service already exists: airplay2-${zone_name}" >> "$log_file"
+        continue
+    fi
+
+    mkdir -p "${service_dir}" "${service_dir}/dependencies.d"
+    echo "longrun" > "${service_dir}/type"
+    touch "${service_dir}/dependencies.d/airplay2-dbus"
+    touch "${service_dir}/dependencies.d/airplay2-avahi"
+    touch "${service_dir}/dependencies.d/airplay2-nqptp"
+
+    mapped_port="$(get_mapped_port "$zone_name")"
+    if [[ -n "$mapped_port" ]] && is_port_available "$mapped_port"; then
+        current_port="$mapped_port"
+        echo "Reusing persisted port ${current_port} for ${zone_name}" >> "$log_file"
+    else
+        if [[ -n "$mapped_port" ]]; then
+            echo "Persisted port ${mapped_port} for ${zone_name} is no longer free, reassigning" >> "$log_file"
+        fi
+        while ! is_port_available "$PORT_BASE"; do
+            PORT_BASE=$((PORT_BASE + 1))
+        done
+        current_port=$PORT_BASE
+        set_mapped_port "$zone_name" "$current_port"
+        echo "Assigned new port ${current_port} for ${zone_name}" >> "$log_file"
+    fi
+    PORT_BASE=$((PORT_BASE + 1))
+    UDP_PORT_BASE=$((UDP_PORT_BASE + 10))
+
+    cat > "${config_file}" <<EOF
 general :
 {
-  name = "${OWNTONE_NAME}";
+  name = "${zone_name}";
   port = ${current_port};
   interface = "${AIRPLAY_INTERFACE}";
   output_backend = "pipe";
@@ -111,24 +140,25 @@ sessioncontrol :
 };
 pipe :
 {
-  name = "${OWNTONE_PIPE}";
-  output_rate = 44100; 
-  output_format = "S16_LE"; 
+  name = "${zone_pipe}";
 };
 EOF
 
-cat > "${service_dir}/run" <<EOF
+    cat > "${service_dir}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 truncate -s 0 "${player_log}"
-echo "\$(date) - Starting AirPlay 2 receiver: ${OWNTONE_NAME} -> pipe ${OWNTONE_PIPE} on port ${current_port}" >> "${player_log}"
+echo "\$(date) - Starting AirPlay 2 receiver: ${zone_name} -> pipe ${zone_pipe} on port ${current_port}" >> "${player_log}"
 exec shairport-sync \
-    -a "${OWNTONE_NAME}" \
+    -a "${zone_name}" \
     -p ${current_port} \
     -c "${config_file}" \
     -vv \
     >> "${player_log}" 2>&1
 EOF
-chmod +x "${service_dir}/run"
-touch "${CONTENTS_DIR}/airplay2-${OWNTONE_NAME}"
+    chmod +x "${service_dir}/run"
+    touch "${CONTENTS_DIR}/airplay2-${zone_name}"
 
-echo "Created: airplay2-${OWNTONE_NAME} -> pipe ${OWNTONE_PIPE} on port ${current_port}" >> "$log_file"
+    echo "Created: airplay2-${zone_name} -> pipe ${zone_pipe} on port ${current_port}" >> "$log_file"
+done < <(grep -v '^\s*#' "${PIPE_ZONES_FILE}" | grep -v '^\s*$')
+
+echo "Total pipe zones processed: ${zone_count}" >> "$log_file"
