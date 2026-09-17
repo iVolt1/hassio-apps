@@ -1,3 +1,4 @@
+ARG BUILD_FROM
 FROM ${BUILD_FROM} AS nqptp-builder
 RUN apk add --no-cache build-base git autoconf automake libtool pkgconfig
 WORKDIR /tmp
