@@ -48,7 +48,7 @@ AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 
 # Overridable via env for now; addon-options-driven config can replace
 # these later without changing anything else in this script.
-OWNTONE_NAME="${OWNTONE_AIRPLAY_NAME:-OwnTone}"
+OWNTONE_NAME="${OWNTONE_AIRPLAY_NAME:-OwnTone_Pipe}"
 OWNTONE_PIPE="${OWNTONE_PIPE_PATH:-/media/music/owntonepipe}"
 
 service_dir="${BASE_DIR}/airplay2-${OWNTONE_NAME}"
