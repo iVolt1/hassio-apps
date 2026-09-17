@@ -112,6 +112,8 @@ sessioncontrol :
 pipe :
 {
   name = "${OWNTONE_PIPE}";
+  output_rate = 44100; 
+  output_format = "S16_LE"; 
 };
 EOF
 
