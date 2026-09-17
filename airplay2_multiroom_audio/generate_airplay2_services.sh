@@ -88,9 +88,22 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
 # veth peers can make avahi see its own announcement echoed back as if
 # from a rival host, producing a perpetual, never-resolving "needs a
 # rename" collision loop against its own name.
+#
+# Also give this daemon its own explicit mDNS hostname. Left unset,
+# avahi-daemon defaults to the machine's system hostname — and under
+# host_network:true, any OTHER addon on this host that also runs its
+# own private avahi-daemon (e.g. the separate AirPlay 1 Multiroom Audio
+# addon) inherits that exact same default. Two independent avahi-daemons
+# both claiming the identical hostname on the same interface fight
+# forever: AVAHI_CLIENT_S_COLLISION is a client/hostname-level state, so
+# it resets EVERY entry group that daemon is tracking, not just one
+# service — which is why previously-stable zones (not just a newly
+# added one) can start cycling through "needs a rename" once a second
+# daemon with the same hostname shows up.
 awk -v iface="${AIRPLAY_INTERFACE}" '
     /^allow-interfaces=/ { next }
-    /^\[server\]/ { print; print "allow-interfaces=" iface; next }
+    /^host-name=/ { next }
+    /^\[server\]/ { print; print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
     { print }
 ' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
     mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
