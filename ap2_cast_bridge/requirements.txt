@@ -1,0 +1,8 @@
+# pychromecast pulls in zeroconf as its discovery backend — pure
+# Python, not system avahi-daemon. shairport-sync itself is built
+# with --with-tinysvcmdns (its own in-process mDNS responder) rather
+# than avahi. Between the two, this addon runs no system mDNS daemon
+# at all, deliberately staying out of the avahi hostname-collision
+# bug class the AirPlay 2 Multiroom Audio addon hit.
+pychromecast>=14.0.0
+zeroconf>=0.130.0
