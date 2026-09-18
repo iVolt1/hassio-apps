@@ -1,5 +1,5 @@
 name: "Cast Bridge"
-version: "0.1.0"
+version: "0.1.1"
 slug: cast_bridge
 description: >-
   Discovers Google Cast (Chromecast) devices on the LAN at startup and
