@@ -23,12 +23,9 @@ headers) masked the symptom but real deployment logs showed the exact
 same 30-second stall/reconnect cycle even with MP3 — so the header bug
 was real but not the whole story; a plain curl of the HTTP stream
 during an active AirPlay session then confirmed our own ffmpeg/HTTP
-serving pipeline produces valid, audible audio, isolating the rest of
-the problem to how the Cast receiver consumes an indefinite-length
-HTTP response (most likely wanting either a known Content-Length or
-chunked transfer framing, neither of which the old handler sent).
+serving pipeline produces valid, audible audio on its own.
 
-Current design fixes both issues at once:
+Current design:
   - PcmBroadcast is a persistent background thread that is the FIFO's
     sole, permanent reader. It never stops reading for lack of HTTP
     subscribers, and when shairport-sync's pipe writer closes (FIFO
@@ -42,11 +39,17 @@ Current design fixes both issues at once:
     output bytes are always a fresh, valid format header — for WAV,
     FLAC, or MP3 alike. This is what makes WAV/FLAC actually safe to
     use now, not just MP3.
-  - The HTTP response is sent with Transfer-Encoding: chunked (the
-    correct HTTP/1.1 way to stream a body of unknown total length)
-    instead of just closing the connection at EOF with no framing
-    hint at all — addressing the other candidate cause from the curl
-    investigation.
+  - The HTTP response is a plain, close-terminated body (Connection:
+    close, no Content-Length, no Transfer-Encoding) — deliberately
+    matching the exact framing the curl test proved works. An earlier
+    revision of this file tried Transfer-Encoding: chunked here, but
+    BaseHTTPRequestHandler answers as HTTP/1.0 unless protocol_version
+    is explicitly raised, and chunked framing on an HTTP/1.0 response
+    is invalid — a client that (correctly, for HTTP/1.0) does not
+    chunk-decode it receives our literal "<hex-length>\r\n...\r\n"
+    chunk framing as corrupted audio bytes instead. That is the
+    suspected reason WAV kept cycling even after the fresh-ffmpeg-
+    per-connection fix went in.
 
 WAV is the default now per real-network testing: this network is
 stable enough that WAV's larger bandwidth isn't a concern, and it
@@ -322,12 +325,7 @@ def make_stream_handler(pcm: PcmBroadcast, zone_name: str, format_spec: dict,
             self.send_response(200)
             self.send_header("Content-Type", format_spec["content_type"])
             self.send_header("Cache-Control", "no-cache")
-            # Length is unknown up front (this is a live, indefinite
-            # stream) — chunked transfer framing is the correct
-            # HTTP/1.1 way to signal that, rather than sending no
-            # length hint at all and relying on the peer to treat
-            # connection-close as end-of-body.
-            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
             self.end_headers()
 
             try:
@@ -337,11 +335,7 @@ def make_stream_handler(pcm: PcmBroadcast, zone_name: str, format_spec: dict,
                         if proc.poll() is not None:
                             break
                         continue
-                    self.wfile.write(b"%x\r\n" % len(out))
                     self.wfile.write(out)
-                    self.wfile.write(b"\r\n")
-                # Final chunk marker.
-                self.wfile.write(b"0\r\n\r\n")
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
