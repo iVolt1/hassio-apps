@@ -74,6 +74,7 @@ ffmpeg/Cast trouble can't take another zone down.
 
 import logging
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -95,6 +96,17 @@ log = logging.getLogger("cast_bridge_zone")
 MAX_QUEUE_CHUNKS = 40
 PCM_CHUNK_SIZE = 4096
 ENCODED_CHUNK_SIZE = 4096
+
+# Hard ceiling on how long a single HTTP connection's ffmpeg can go
+# without producing any output before we give up on it. Belt-and-
+# suspenders against the same failure mode the has_writer check in
+# CastZoneWorker.run() addresses at the source: without SOME bound
+# here, a connection that started before any real PCM existed (or
+# whose PCM source went quiet mid-stream) would block this handler
+# thread — and its ffmpeg subprocess — forever, which is exactly how
+# thousands of never-cleaned-up threads/processes accumulated into a
+# multi-gigabyte leak in production.
+STREAM_READ_TIMEOUT_SECONDS = 20
 
 # See the module docstring's "Architecture note" for why WAV is now
 # safe to use (each HTTP connection gets its own fresh ffmpeg process,
@@ -221,6 +233,14 @@ class PcmBroadcast(Broadcast):
         self.zone_name = zone_name
         self._stop = threading.Event()
         self._thread = None
+        # True only while a real AirPlay session is actively writing
+        # to this FIFO. The watchdog in CastZoneWorker.run() uses this
+        # to tell "nothing is playing right now" (expected, IDLE is
+        # fine) apart from "something IS playing but Cast dropped it"
+        # (an actual stall worth reconnecting for) — see run()'s
+        # comment for why conflating the two caused a real memory
+        # leak in production.
+        self.has_writer = False
 
     def start(self):
         if not os.path.exists(self.fifo_path):
@@ -245,6 +265,7 @@ class PcmBroadcast(Broadcast):
                 continue
 
             log.info("[%s] FIFO writer connected, reading PCM", self.zone_name)
+            self.has_writer = True
             try:
                 while not self._stop.is_set():
                     chunk = os.read(fd, PCM_CHUNK_SIZE)
@@ -256,10 +277,12 @@ class PcmBroadcast(Broadcast):
                         break
                     self.publish(chunk)
             finally:
+                self.has_writer = False
                 os.close(fd)
 
     def stop(self):
         self._stop.set()
+        self.has_writer = False
         self.close_all()
 
 
@@ -329,12 +352,33 @@ def make_stream_handler(pcm: PcmBroadcast, zone_name: str, format_spec: dict,
             self.end_headers()
 
             try:
+                last_data_time = time.time()
                 while True:
+                    ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                    if not ready:
+                        if proc.poll() is not None:
+                            break
+                        if time.time() - last_data_time > STREAM_READ_TIMEOUT_SECONDS:
+                            # ffmpeg is alive but has produced nothing
+                            # for too long (e.g. connected before any
+                            # AirPlay session started, or the FIFO
+                            # went quiet mid-stream). Give up on this
+                            # connection rather than block this thread
+                            # (and its ffmpeg process) forever — an
+                            # earlier version of this handler had no
+                            # such bound, which is how a run of
+                            # doomed-from-the-start connections turned
+                            # into a slow, unbounded resource leak.
+                            log.warning("[%s] No stream data for %ds, giving up on this connection",
+                                        zone_name, STREAM_READ_TIMEOUT_SECONDS)
+                            break
+                        continue
                     out = proc.stdout.read(ENCODED_CHUNK_SIZE)
                     if not out:
                         if proc.poll() is not None:
                             break
                         continue
+                    last_data_time = time.time()
                     self.wfile.write(out)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -448,6 +492,7 @@ class CastZoneWorker:
         self._start_http()
 
         cast = None
+        had_writer = False
         last_healthy = time.time()
 
         while not self._stop.is_set():
@@ -458,13 +503,19 @@ class CastZoneWorker:
                                 self.name, self.chromecast_name or self.chromecast_host)
                     time.sleep(WATCHDOG_INTERVAL_SECONDS)
                     continue
-                if not self._play(cast):
-                    cast = None
-                    time.sleep(WATCHDOG_INTERVAL_SECONDS)
-                    continue
+                # Don't play_media() here just because we found the
+                # Cast device — wait for the loop below to see a real
+                # AirPlay session start (writer_started). See that
+                # comment for why calling play_media unconditionally,
+                # whether or not anything was actually playing, is
+                # what caused the memory leak this replaced.
                 last_healthy = time.time()
 
             time.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+            has_writer = self._pcm.has_writer
+            writer_started = has_writer and not had_writer
+            had_writer = has_writer
 
             try:
                 cast.media_controller.update_status()
@@ -476,9 +527,28 @@ class CastZoneWorker:
 
             if state in ("PLAYING", "BUFFERING"):
                 last_healthy = time.time()
-            elif time.time() - last_healthy > STALL_TOLERANCE_SECONDS:
-                log.warning("[%s] Playback stalled (state=%s), re-issuing play_media",
-                            self.name, state)
+                continue
+
+            if not has_writer:
+                # No active AirPlay session on this zone right now —
+                # IDLE is the expected resting state here, not a
+                # stall. The previous version of this loop treated
+                # "not PLAYING" as "broken, reconnect" unconditionally,
+                # which meant it kept forcing a brand-new HTTP
+                # connection and ffmpeg process every
+                # STALL_TOLERANCE_SECONDS, forever, even when a zone
+                # was simply idle all day with nobody AirPlaying to
+                # it. Each of those connections then blocked forever
+                # waiting on PCM that was never coming (nothing was
+                # playing), and nothing ever cleaned them up — that's
+                # the actual mechanism behind the multi-gigabyte
+                # memory growth reported after ~a day of uptime.
+                last_healthy = time.time()
+                continue
+
+            if writer_started or time.time() - last_healthy > STALL_TOLERANCE_SECONDS:
+                log.info("[%s] Starting/resuming Cast playback (state=%s, writer_started=%s)",
+                         self.name, state, writer_started)
                 if self._play(cast):
                     last_healthy = time.time()
                 else:
