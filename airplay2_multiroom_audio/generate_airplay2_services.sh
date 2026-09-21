@@ -205,7 +205,7 @@ while read -r sink; do
 
     UDP_PORT_BASE=$((UDP_PORT_BASE + 10))
     current_sink=$sink
-    current_name=$friendly_name
+    current_name="${friendly_name//_/}"
     current_log=$player_log
     current_udp_base=$UDP_PORT_BASE
 
@@ -225,8 +225,8 @@ sessioncontrol :
 };
 diagnostics :
 {
-//  log_show_time_since_startup = "yes";
-//  log_show_time_since_last_message = "no";
+  log_show_time_since_startup = "yes";
+  log_show_time_since_last_message = "no";
 };
 pulseaudio :
 {
