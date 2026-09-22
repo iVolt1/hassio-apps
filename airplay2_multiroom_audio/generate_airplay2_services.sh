@@ -18,7 +18,7 @@ mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 # service comment for why that restriction matters.
 AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 
-# --- Bounce master sinks before generating zone services ----------------
+# --- Bounce master sinks & recreate remap sinks before generating zone services ----------------
 # HDMI (and some other ALSA-card) sinks don't resume cleanly on their own
 # after the receiver is power-cycled or the cable is unplugged/replugged:
 # PulseAudio's sink stays "RUNNING"/"IDLE" but the underlying ALSA PCM
@@ -33,32 +33,51 @@ AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 # virtual routing sink with no ALSA backing of its own. Bouncing a remap
 # sink does nothing to the real hardware behind it; only bouncing its
 # underlying MASTER sink (the actual hw:... ALSA sink the remap was built
-# on top of) resets the PCM device. So for each remap sink found below,
-# resolve its owning module's master= argument and bounce that instead.
+# on top of) resets the PCM device.
+#
+# Bouncing the master alone isn't enough, though: these remap sinks are
+# created by the separate Multiroom Audio Controller addon, not by this
+# one, and testing showed that bouncing the master here did not restore
+# sound (see generate_airplay2_services.log: the bounce ran against the
+# correct master, but audio still didn't play). That addon appears to
+# recreate the remap sink itself once the master's state changes, on its
+# own schedule — which races this script: either it hasn't recreated the
+# sink yet by the time the loop below scans for zones, or it recreates it
+# in a way that isn't actually attached to the freshly-reset master.
+# Rather than depend on that addon's timing, this addon now captures each
+# remap sink's exact module arguments (name, master, channels, channel
+# map, etc.) and unloads + reloads it itself immediately after bouncing
+# its master — so the remap sink is guaranteed to exist, under its
+# correct name, freshly attached to the just-reset master, before any
+# zone service generation below reads the sink list.
 #
 # This runs unconditionally, before any zone services are (re)created.
 # That's safe here specifically because this whole script only runs via
 # S6_STAGE2_HOOK — i.e. on a full container start/restart — which already
 # tears down and respawns every shairport-sync-pa service regardless of
-# anything done here. Bouncing the master sinks a few hundred ms earlier
-# in that same restart window doesn't newly interrupt any zone beyond what
+# anything done here. Bouncing/recreating the sinks a little earlier in
+# that same restart window doesn't newly interrupt any zone beyond what
 # the restart itself was already going to do.
-get_master_sink() {
-    # Given a remap sink name, resolve the underlying hardware sink it's
-    # built on. Remap sinks have no ALSA backing of their own, so bouncing
-    # the remap sink itself would not reset the actual HDMI/ALSA device;
-    # only the master sink does.
-    local remap_sink="$1" owner_module
-    owner_module="$(pactl list sinks | awk -v name="$remap_sink" '
+get_owner_module() {
+    # Given a sink name, print the module number that owns it.
+    local sink_name="$1"
+    pactl list sinks | awk -v name="$sink_name" '
         $0 ~ "Name: "name"$" { f=1 }
         f && /Owner Module:/ { print $3; exit }
-    ')"
-    [[ -z "$owner_module" ]] && return
-    pactl list modules | awk -v mod="$owner_module" '
-        $0 == "Module #"mod { f=1 }
+    '
+}
+
+get_module_args() {
+    # Given a module number, print its exact load-time "Argument:" string
+    # (e.g. "sink_name=Foo master=bar channels=2 channel_map=front-left,front-right"),
+    # so the module can be unloaded and reloaded identically.
+    local mod="$1"
+    pactl list modules | awk -v mod="$mod" '
+        $0 == "Module #"mod { f=1; next }
+        f && /^Module #/ { exit }
         f && /Argument:/ {
-            n = split($0, parts, "master=")
-            if (n > 1) { split(parts[2], m, " "); print m[1] }
+            sub(/^[ \t]*Argument:[ \t]*/, "")
+            print
             exit
         }
     '
@@ -75,12 +94,39 @@ bounce_sink() {
 declare -A bounced_masters
 while read -r remap_sink; do
     [[ -z "$remap_sink" ]] && continue
-    master_sink="$(get_master_sink "$remap_sink")"
-    [[ -z "$master_sink" ]] && continue
-    [[ -n "${bounced_masters[$master_sink]:-}" ]] && continue
-    bounced_masters["$master_sink"]=1
-    echo "Bouncing master sink ${master_sink} (underlies ${remap_sink}) before zone generation" >> "$log_file"
-    bounce_sink "$master_sink"
+
+    owner_module="$(get_owner_module "$remap_sink")"
+    if [[ -z "$owner_module" ]]; then
+        echo "Could not resolve owner module for remap sink ${remap_sink}, skipping bounce/recreate" >> "$log_file"
+        continue
+    fi
+
+    remap_args="$(get_module_args "$owner_module")"
+    if [[ -z "$remap_args" ]]; then
+        echo "Could not resolve module arguments for ${remap_sink} (module #${owner_module}), skipping bounce/recreate" >> "$log_file"
+        continue
+    fi
+
+    master_sink="$(echo "$remap_args" | grep -oE 'master=[^ ]+' | cut -d= -f2)"
+    if [[ -z "$master_sink" ]]; then
+        echo "Could not resolve master= for ${remap_sink} from its module arguments, skipping bounce/recreate" >> "$log_file"
+        continue
+    fi
+
+    if [[ -z "${bounced_masters[$master_sink]:-}" ]]; then
+        bounced_masters["$master_sink"]=1
+        echo "Bouncing master sink ${master_sink} (underlies ${remap_sink}) before zone generation" >> "$log_file"
+        bounce_sink "$master_sink"
+    fi
+
+    echo "Recreating remap sink ${remap_sink} (module #${owner_module}, args: ${remap_args})" >> "$log_file"
+    pactl unload-module "$owner_module"
+    sleep 0.2
+    # Intentional word-splitting: remap_args is a captured
+    # "key=value key=value ..." list and pactl load-module expects each
+    # key=value as its own word, exactly as it was originally invoked.
+    # shellcheck disable=SC2086
+    pactl load-module module-remap-sink $remap_args >> "$log_file" 2>&1
 done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
 
 # --- Persistent name -> port map ---------------------------------------
