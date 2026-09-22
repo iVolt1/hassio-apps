@@ -527,6 +527,33 @@ class CastZoneWorker:
                                 self.name, self.chromecast_name or self.chromecast_host)
                     time.sleep(WATCHDOG_INTERVAL_SECONDS)
                     continue
+                # get_chromecast_from_host()/get_chromecasts() only ever
+                # *construct* a Chromecast object -- neither one starts its
+                # SocketClient thread or connects it. Until something calls
+                # cast.wait() (which lazily calls socket_client.start() the
+                # first time), socket_client.host sits at its hardcoded
+                # default of the literal string "unknown" and every call
+                # through it raises "Chromecast unknown:8009 is
+                # connecting...". This loop used to skip straight to
+                # update_status() below without ever calling wait() first
+                # -- since nothing had connected yet, every single
+                # watchdog cycle failed with that exact error, forever,
+                # for EVERY zone (this was never actually specific to Cast
+                # groups/stereo pairs, despite that being the working
+                # theory last round -- Living Room Soundbar, a plain
+                # single device, hit the identical failure). Establish the
+                # connection here, once, right after acquiring the cast
+                # object, instead of implicitly relying on _play()'s own
+                # cast.wait() call, which only happens much later and only
+                # if a writer ever starts.
+                try:
+                    cast.wait(timeout=15)
+                except Exception:
+                    log.warning("[%s] Failed to connect to Cast device, retrying",
+                                self.name, exc_info=True)
+                    cast = None
+                    time.sleep(WATCHDOG_INTERVAL_SECONDS)
+                    continue
                 # Don't play_media() here just because we found the
                 # Cast device — wait for the loop below to see a real
                 # AirPlay session start (writer_started). See that
