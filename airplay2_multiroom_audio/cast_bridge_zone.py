@@ -453,8 +453,17 @@ class CastZoneWorker:
                 )
                 return cast
             except Exception:
+                # exc_info=True here is deliberate and load-bearing, not
+                # decoration: the bare "except Exception" below used to
+                # swallow the real error entirely, which is exactly why a
+                # run of consecutive failures against this same host
+                # looked identical in the log whether the cause was a
+                # stale/wrong IP (e.g. a stereo-pair group's active
+                # "leader" address moving to a different paired speaker),
+                # a timeout, or something else -- there was no way to
+                # tell from the log alone.
                 log.warning("[%s] Direct connect to %s failed, falling back to discovery",
-                            self.name, self.chromecast_host)
+                            self.name, self.chromecast_host, exc_info=True)
 
         # Fallback: a full, blocking discovery scan. get_chromecasts()
         # manages its own zeroconf instance's lifecycle correctly
@@ -521,7 +530,15 @@ class CastZoneWorker:
                 cast.media_controller.update_status()
                 state = cast.media_controller.status.player_state
             except Exception:
-                log.warning("[%s] Lost connection to Cast device, reconnecting", self.name)
+                # exc_info=True is deliberate here too -- this is the
+                # exact failure that repeated every ~10s, every cycle,
+                # for the whole 'no sound for days' Cast Bridge outage,
+                # with nothing in the log to say WHY update_status() kept
+                # failing (stale connection, timeout, protocol error,
+                # etc.). Without the real exception this is a guessing
+                # game every time it recurs.
+                log.warning("[%s] Lost connection to Cast device, reconnecting",
+                            self.name, exc_info=True)
                 cast = None
                 continue
 
