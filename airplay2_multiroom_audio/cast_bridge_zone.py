@@ -444,7 +444,22 @@ class CastZoneWorker:
         # "AssertionError: Zeroconf instance loop must be running" —
         # which is what was actually causing every play attempt to
         # time out.
-        if self.chromecast_host and self.chromecast_uuid:
+        # Groups and stereo pairs (this is exactly what "MBR stereo pair"
+        # and "Master bath pair" are) don't expose a stable per-target
+        # host the way a single physical Chromecast does -- pychromecast's
+        # own discovery leaves cast_info.host as the literal string
+        # "unknown" for them, and cast_bridge_manager.py captured that
+        # as-is into chromecast_host at its startup discovery.
+        # get_chromecast_from_host() doesn't raise when given "unknown" as
+        # the host -- it happily builds a Chromecast object pointed at it
+        # -- so the failure only ever surfaced later, inside
+        # update_status(), as "Chromecast unknown:8009 is connecting...",
+        # every single watchdog cycle, forever: retrying _get_chromecast()
+        # with the same persisted "unknown" host just repeats the same
+        # broken attempt. Skip straight to the discovery fallback below
+        # whenever the captured host isn't a real, usable value.
+        if (self.chromecast_host and self.chromecast_host != "unknown"
+                and self.chromecast_uuid):
             try:
                 cast = pychromecast.get_chromecast_from_host(
                     (self.chromecast_host, self.chromecast_port,
