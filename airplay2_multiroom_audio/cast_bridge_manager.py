@@ -129,14 +129,35 @@ def save_name_port_map(path: Path, m: dict):
 
 
 def get_or_assign_port(name: str, port_map: dict, base: int) -> int:
-    """Reuses name's persisted port if still free; otherwise finds the
-    next free port at/after base, persists it, and returns it. Mutates
-    port_map in place."""
+    """Reuses name's persisted port if still free and not ALSO claimed by
+    a different name in port_map; otherwise finds the next free,
+    unclaimed port at/after base, persists it, and returns it. Mutates
+    port_map in place.
+
+    The "still free" check used to be is_port_available() alone -- but
+    that only reflects whether the OS currently has something bound to
+    the port, not whether port_map.txt's own entries agree with each
+    other. At generation time every shairport-sync process is typically
+    down (mid-restart), so is_port_available() sees every port as free
+    regardless of what the map itself says -- which is how two different
+    zones (one from this script, one from generate_airplay2_services.sh,
+    since both read/write the same PORT_MAP_FILE) ended up both
+    persisted against port 5120 in production: whichever zone's process
+    happened to bind first won the port, and the other silently never
+    came up. Checking the map's own entries directly, not just the OS's
+    current bind state, closes that gap.
+    """
+    others = {k: v for k, v in port_map.items() if k != name}
     existing = port_map.get(name)
-    if existing is not None and is_port_available(existing):
-        return existing
+    if existing is not None:
+        if existing in others.values():
+            log.warning(
+                "Persisted port %d for '%s' is also claimed by another "
+                "entry in the port map, reassigning", existing, name)
+        elif is_port_available(existing):
+            return existing
     port = base
-    used = set(port_map.values())
+    used = set(others.values())
     while port in used or not is_port_available(port):
         port += 1
     port_map[name] = port
