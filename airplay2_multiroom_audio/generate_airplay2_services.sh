@@ -18,6 +18,71 @@ mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 # service comment for why that restriction matters.
 AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
 
+# --- Bounce master sinks before generating zone services ----------------
+# HDMI (and some other ALSA-card) sinks don't resume cleanly on their own
+# after the receiver is power-cycled or the cable is unplugged/replugged:
+# PulseAudio's sink stays "RUNNING"/"IDLE" but the underlying ALSA PCM
+# device never re-opens, so no audio actually reaches the hardware again
+# until something forces PulseAudio to close and reopen that PCM device.
+# This is the same class of fix as suspend_resume_sink() in the local_audio
+# provider's pa_simple.py: pactl suspend-sink <name> 1 followed by
+# suspend-sink <name> 0 forces PulseAudio to tear down and reopen the ALSA
+# PCM device, which is what actually clears a stuck HDMI resume.
+#
+# Every zone this script generates is a module-remap-sink, though — a
+# virtual routing sink with no ALSA backing of its own. Bouncing a remap
+# sink does nothing to the real hardware behind it; only bouncing its
+# underlying MASTER sink (the actual hw:... ALSA sink the remap was built
+# on top of) resets the PCM device. So for each remap sink found below,
+# resolve its owning module's master= argument and bounce that instead.
+#
+# This runs unconditionally, before any zone services are (re)created.
+# That's safe here specifically because this whole script only runs via
+# S6_STAGE2_HOOK — i.e. on a full container start/restart — which already
+# tears down and respawns every shairport-sync-pa service regardless of
+# anything done here. Bouncing the master sinks a few hundred ms earlier
+# in that same restart window doesn't newly interrupt any zone beyond what
+# the restart itself was already going to do.
+get_master_sink() {
+    # Given a remap sink name, resolve the underlying hardware sink it's
+    # built on. Remap sinks have no ALSA backing of their own, so bouncing
+    # the remap sink itself would not reset the actual HDMI/ALSA device;
+    # only the master sink does.
+    local remap_sink="$1" owner_module
+    owner_module="$(pactl list sinks | awk -v name="$remap_sink" '
+        $0 ~ "Name: "name"$" { f=1 }
+        f && /Owner Module:/ { print $3; exit }
+    ')"
+    [[ -z "$owner_module" ]] && return
+    pactl list modules | awk -v mod="$owner_module" '
+        $0 == "Module #"mod { f=1 }
+        f && /Argument:/ {
+            n = split($0, parts, "master=")
+            if (n > 1) { split(parts[2], m, " "); print m[1] }
+            exit
+        }
+    '
+}
+
+bounce_sink() {
+    local sink="$1"
+    [[ -z "$sink" ]] && return
+    pactl suspend-sink "$sink" 1
+    sleep 0.5
+    pactl suspend-sink "$sink" 0
+}
+
+declare -A bounced_masters
+while read -r remap_sink; do
+    [[ -z "$remap_sink" ]] && continue
+    master_sink="$(get_master_sink "$remap_sink")"
+    [[ -z "$master_sink" ]] && continue
+    [[ -n "${bounced_masters[$master_sink]:-}" ]] && continue
+    bounced_masters["$master_sink"]=1
+    echo "Bouncing master sink ${master_sink} (underlies ${remap_sink}) before zone generation" >> "$log_file"
+    bounce_sink "$master_sink"
+done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
+
 # --- Persistent name -> port map ---------------------------------------
 # /etc/s6-overlay/s6-rc.d does NOT survive a container restart, so the
 # "service dir already exists, reuse its port" check below can never
