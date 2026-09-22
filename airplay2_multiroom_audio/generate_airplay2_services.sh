@@ -147,8 +147,23 @@ done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
 # forever, only falling forward to a new port for a given name if its
 # previously-recorded port is actually taken by something else at
 # generation time. This same file is also shared with
-# cast_bridge_manager.py's Cast Bridge zones below, so no two zones —
-# sink-backed or Cast-backed — can ever collide on a port.
+# cast_bridge_manager.py's Cast Bridge zones below.
+#
+# That reuse check used to be is_port_available() alone -- whether the
+# OS currently has something bound to that port -- which only catches a
+# collision with an unrelated process, not with ANOTHER zone's own
+# persisted entry. At generation time every shairport-sync process is
+# typically down (mid-restart), so is_port_available() sees every port
+# as free regardless of what port_map.txt itself already says, and a
+# genuinely new zone's port scan can land squarely on a port some other
+# zone's own line already claims -- exactly the silent collision found
+# in production between "HD_Audio_Generic_Digital_Surround_7_1_HDMI_2_
+# rl_rr" and "Yamaha_TV", both persisted at port 5120: whichever zone's
+# shairport-sync actually starts first wins that port, and the other
+# fails to bind it and never comes up, with nothing in this script's own
+# log to say so. port_claimed_by_other() closes that gap by checking
+# port_map.txt's own entries directly, not just the OS's current bind
+# state.
 PORT_MAP_FILE="${CONFIG_DIR}/port_map.txt"
 touch "${PORT_MAP_FILE}"
 
@@ -164,6 +179,18 @@ set_mapped_port() {
     awk -v name="$1" '$1 != name' "${PORT_MAP_FILE}" > "$tmp"
     echo "$1 $2" >> "$tmp"
     mv "$tmp" "${PORT_MAP_FILE}"
+}
+
+port_claimed_by_other() {
+    # True (exit 0) if $1 is recorded in port_map.txt against some name
+    # OTHER than $2 -- i.e. this port is already owned by a different
+    # zone, regardless of whether that zone's process happens to be
+    # running (and therefore visible to is_port_available()) right now.
+    local port="$1" self_name="$2"
+    awk -v port="$port" -v self="$self_name" '
+        $2 == port && $1 != self { found=1 }
+        END { exit !found }
+    ' "${PORT_MAP_FILE}"
 }
 
 # --- One-time, container-wide services: dbus -> avahi -> nqptp -> castbridge-manager ---
@@ -292,20 +319,25 @@ while read -r sink; do
     touch "${service_dir}/dependencies.d/airplay2-avahi"
     touch "${service_dir}/dependencies.d/airplay2-nqptp"
 
-    # Reuse this zone's previously-assigned port if it's still free.
-    # Only fall forward to a new port (and re-persist it) if the old
-    # one is actually taken by something else right now — keeping the
+    # Reuse this zone's previously-assigned port if it's still free AND
+    # not claimed by some OTHER zone's own persisted entry. Only fall
+    # forward to a new port (and re-persist it) otherwise — keeping the
     # port, and therefore the derived AirPlay 2 device ID, stable
     # across restarts instead of drifting with pactl's scan order.
     mapped_port="$(get_mapped_port "$friendly_name")"
-    if [[ -n "$mapped_port" ]] && is_port_available "$mapped_port"; then
+    if [[ -n "$mapped_port" ]] && is_port_available "$mapped_port" \
+        && ! port_claimed_by_other "$mapped_port" "$friendly_name"; then
         current_port="$mapped_port"
         echo "Reusing persisted port ${current_port} for ${friendly_name}" >> "$log_file"
     else
         if [[ -n "$mapped_port" ]]; then
-            echo "Persisted port ${mapped_port} for ${friendly_name} is no longer free, reassigning" >> "$log_file"
+            if port_claimed_by_other "$mapped_port" "$friendly_name"; then
+                echo "Persisted port ${mapped_port} for ${friendly_name} is also claimed by another zone in port_map.txt, reassigning" >> "$log_file"
+            else
+                echo "Persisted port ${mapped_port} for ${friendly_name} is no longer free, reassigning" >> "$log_file"
+            fi
         fi
-        while ! is_port_available "$PORT_BASE"; do
+        while ! is_port_available "$PORT_BASE" || port_claimed_by_other "$PORT_BASE" "$friendly_name"; do
             PORT_BASE=$((PORT_BASE + 1))
         done
         current_port=$PORT_BASE
