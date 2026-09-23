@@ -1,4 +1,28 @@
 #!/bin/bash
+
+# Guard against two overlapping invocations of this script racing on the
+# same PulseAudio remap sinks. This is exactly what produced
+# "HD_Audio_Generic_Digital_Surround_7_1_HDMI_2_rl_rr.2"-style duplicate
+# sinks (and duplicate airplay2-<name>.2 zones/services): two runs each
+# unload-then-reload the same sink name, and when their unload/reload
+# pairs interleave, one run's reload lands on top of a sink name the
+# other run's reload just claimed -- PulseAudio doesn't error on that,
+# it silently auto-suffixes the loser ".2", so the failure mode is
+# extra duplicate zones, not a crash. Restarting more than one thing
+# that triggers this script at close to the same time (e.g. two addons,
+# or the same addon restarted twice in quick succession before the
+# first run exited) is exactly the trigger -- and this script's own log
+# file made it worse: it's truncated fresh (>) on every run but written
+# to with >> everywhere else, so two overlapping runs' output lands in
+# the same log under a single header, looking like one run did
+# everything twice. Block here until any other running instance
+# finishes, rather than letting both proceed at once.
+exec 200>/tmp/generate_airplay2_services.lock
+if ! flock -w 120 200; then
+    echo "$(date) — generate_airplay2_services.sh: another instance is still running after 120s, giving up" >> /tmp/airplay2_gen_debug.log
+    exit 1
+fi
+
 echo "$(date) — generate_airplay2_services.sh started" >> /tmp/airplay2_gen_debug.log
 log_file="/config/shairport-sync/logs/generate_airplay2_services.log"
 mkdir -p "$(dirname "$log_file")"
