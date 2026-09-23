@@ -56,6 +56,7 @@ import time
 from pathlib import Path
 
 import pychromecast
+import zeroconf as zeroconf_lib
 
 log = logging.getLogger("cast_bridge_manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [castbridge-manager] %(levelname)s %(message)s")
@@ -77,6 +78,13 @@ PIPE_DIR = Path("/media/music/castbridge")
 
 AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
 DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("CAST_DISCOVERY_TIMEOUT", "10"))
+
+# How long to listen for existing _airplay._tcp mDNS advertisers before
+# deciding which Cast devices already have native AirPlay 2 (see
+# discover_airplay2_names() below). Matches DISCOVERY_TIMEOUT_SECONDS's
+# default rather than adding another knob to tune.
+AIRPLAY2_MDNS_TYPE = "_airplay._tcp.local."
+AIRPLAY2_PROBE_SECONDS = 5.0
 
 # Separate range from the sink zones' 5120+, so the two generators
 # don't start out racing for the same starting port. Real safety still
@@ -164,10 +172,75 @@ def get_or_assign_port(name: str, port_map: dict, base: int) -> int:
     return port
 
 
+class _AirPlay2NameCollector(zeroconf_lib.ServiceListener):
+    """Collects the instance names of whatever's already advertising
+    _airplay._tcp on the network. For mDNS service-discovery names the
+    convention is "<instance name>.<type>.<domain>", and shairport-sync
+    (and every real AirPlay 2 receiver, e.g. a TV or soundbar's own
+    firmware) sets that instance name to its human-readable device name
+    -- the same name Cast discovery reports as friendly_name for the
+    same physical unit. That's what makes this a reliable, hardware-
+    agnostic way to tell "this Cast device already has its own AirPlay 2
+    receiver" from "this Cast device needs a bridge zone", without
+    listing specific devices by name anywhere in this script.
+    """
+
+    def __init__(self):
+        self.names = set()
+
+    def _record(self, type_: str, name: str) -> None:
+        suffix = f".{type_}"
+        display = name[: -len(suffix)] if name.endswith(suffix) else name
+        self.names.add(display.strip().lower())
+
+    def add_service(self, zc, type_, name):
+        self._record(type_, name)
+
+    def update_service(self, zc, type_, name):
+        self._record(type_, name)
+
+    def remove_service(self, zc, type_, name):
+        pass
+
+
+def discover_airplay2_names(timeout: float = AIRPLAY2_PROBE_SECONDS) -> set:
+    """Briefly browses mDNS for existing _airplay._tcp advertisers and
+    returns their instance names, lowercased. Called once, before this
+    script spawns any of its own shairport-sync bridge instances, so it
+    only ever sees AirPlay 2 receivers this script didn't itself create
+    -- built-in TV/soundbar firmware and the separate PulseAudio-sink
+    zones from generate_airplay2_services.sh, not this run's own bridge
+    zones (those don't exist yet at this point in main()).
+    """
+    zc = zeroconf_lib.Zeroconf()
+    collector = _AirPlay2NameCollector()
+    browser = zeroconf_lib.ServiceBrowser(zc, AIRPLAY2_MDNS_TYPE, collector)
+    try:
+        time.sleep(timeout)
+    finally:
+        browser.cancel()
+        zc.close()
+    return collector.names
+
+
 def discover_chromecasts():
     log.info("Discovering Cast devices (up to %ds)...", DISCOVERY_TIMEOUT_SECONDS)
     casts, browser = pychromecast.get_chromecasts(timeout=DISCOVERY_TIMEOUT_SECONDS)
     pychromecast.discovery.stop_discovery(browser)
+
+    log.info("Probing for existing AirPlay 2 receivers (up to %.0fs)...", AIRPLAY2_PROBE_SECONDS)
+    airplay2_names = discover_airplay2_names()
+
+    if airplay2_names:
+        kept = []
+        for c in casts:
+            if c.cast_info.friendly_name.strip().lower() in airplay2_names:
+                log.info("Excluding '%s' from Cast Bridge (already advertising its own "
+                         "AirPlay 2 receiver)", c.cast_info.friendly_name)
+            else:
+                kept.append(c)
+        casts = kept
+
     if casts:
         log.info("Found %d Cast device(s): %s", len(casts),
                   ", ".join(c.cast_info.friendly_name for c in casts))
