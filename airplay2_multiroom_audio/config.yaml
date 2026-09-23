@@ -1,5 +1,5 @@
 name:     Airplay2 Multiroom Audio
-version: "0.37"
+version: "0.38"
 slug:     airplay2_multiroom_audio
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
