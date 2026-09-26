@@ -115,6 +115,68 @@ bounce_sink() {
     pactl suspend-sink "$sink" 0
 }
 
+# --- Deduplicate remap sinks left over from a prior overlapping run -----
+# Before the flock fix above existed, two overlapping invocations of this
+# script could each unload+reload the same sink name at the same time;
+# PulseAudio doesn't error on that, it silently auto-suffixes the loser's
+# sink name ".2", ".3", etc. Once such a duplicate module exists, it lingers
+# in PulseAudio indefinitely (this addon restarting doesn't reset
+# PulseAudio's own module state), and every subsequent run of the
+# recreate loop below would just unload and reload it again using ITS OWN
+# CAPTURED sink_name= argument -- which is the *original*, un-suffixed
+# name -- so PulseAudio collides and re-suffixes it right back to ".2"
+# every single time. That's why duplicates like "BA_790.2" kept coming
+# back even after the flock fix: the flock stops NEW duplicates from
+# being created by two racing runs, but does nothing to clean up ones
+# that already exist, and the recreate loop has no way to tell "this is a
+# duplicate of another module" from "this is a legitimately different
+# zone" -- it just recreates whatever pactl currently lists, forever.
+#
+# Fix: before bouncing/recreating anything, group all module-remap-sink
+# instances by the sink_name= they were ORIGINALLY loaded with (from
+# their module arguments, not their current -- possibly auto-suffixed --
+# pactl name). Any sink_name with more than one owning module is a
+# duplicate: keep exactly one (preferring whichever module's current
+# pactl name has no auto-suffix at all, i.e. exactly matches sink_name=)
+# and unload the rest outright, without reloading them. Only then does
+# the recreate loop below see one module per intended zone.
+declare -A canonical_owner       # sink_name -> "module_id current_name" kept
+declare -A duplicate_modules_str # sink_name -> "module_id:current_name " extras
+
+while read -r current_name; do
+    [[ -z "$current_name" ]] && continue
+    owner_module="$(get_owner_module "$current_name")"
+    [[ -z "$owner_module" ]] && continue
+    args="$(get_module_args "$owner_module")"
+    [[ -z "$args" ]] && continue
+    sink_name="$(echo "$args" | grep -oE 'sink_name=[^ ]+' | cut -d= -f2)"
+    [[ -z "$sink_name" ]] && continue
+
+    if [[ -z "${canonical_owner[$sink_name]:-}" ]]; then
+        canonical_owner["$sink_name"]="${owner_module} ${current_name}"
+    else
+        existing_module="${canonical_owner[$sink_name]%% *}"
+        existing_name="${canonical_owner[$sink_name]#* }"
+        if [[ "$current_name" == "$sink_name" && "$existing_name" != "$sink_name" ]]; then
+            # This candidate is the unsuffixed one -- swap it in as the
+            # keeper and demote the previous keeper to a duplicate.
+            duplicate_modules_str["$sink_name"]+="${existing_module}:${existing_name} "
+            canonical_owner["$sink_name"]="${owner_module} ${current_name}"
+        else
+            duplicate_modules_str["$sink_name"]+="${owner_module}:${current_name} "
+        fi
+    fi
+done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
+
+for sink_name in "${!duplicate_modules_str[@]}"; do
+    for entry in ${duplicate_modules_str[$sink_name]}; do
+        dup_module="${entry%%:*}"
+        dup_name="${entry#*:}"
+        echo "Removing duplicate remap sink ${dup_name} (module #${dup_module}), a leftover extra instance of ${sink_name}" >> "$log_file"
+        pactl unload-module "$dup_module"
+    done
+done
+
 declare -A bounced_masters
 while read -r remap_sink; do
     [[ -z "$remap_sink" ]] && continue
