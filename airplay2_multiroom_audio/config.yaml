@@ -14,4 +14,4 @@ init: false
 startup: services
 boot: auto
 backup: hot
-stage: beta
+stage: experimental
