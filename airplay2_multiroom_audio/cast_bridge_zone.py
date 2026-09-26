@@ -568,6 +568,41 @@ class CastZoneWorker:
             writer_started = has_writer and not had_writer
             had_writer = has_writer
 
+            if not has_writer:
+                # No active AirPlay session on this zone right now —
+                # IDLE is the expected resting state here, not a
+                # stall. The previous version of this loop treated
+                # "not PLAYING" as "broken, reconnect" unconditionally,
+                # which meant it kept forcing a brand-new HTTP
+                # connection and ffmpeg process every
+                # STALL_TOLERANCE_SECONDS, forever, even when a zone
+                # was simply idle all day with nobody AirPlaying to
+                # it. Each of those connections then blocked forever
+                # waiting on PCM that was never coming (nothing was
+                # playing), and nothing ever cleaned them up — that's
+                # the actual mechanism behind the multi-gigabyte
+                # memory growth reported after ~a day of uptime.
+                #
+                # This check now also runs BEFORE update_status(), not
+                # after -- update_status() used to be called
+                # unconditionally, every watchdog cycle, even while
+                # idle. pychromecast's own BaseController.send_message()
+                # transparently launches the target app (the Default
+                # Media Receiver, CC1AD845) first if it isn't already
+                # the active app on the device, and every real Cast
+                # device auto-closes that app on its own after a few
+                # minutes with nothing loaded -- confirmed in
+                # MBR_stereo_pair-bridge.log as a "Receiver:Launching
+                # app CC1AD845" line recurring on a clockwork ~5m10s
+                # cadence with no FIFO writer activity anywhere nearby.
+                # That relaunch is exactly what the Cast device
+                # announces audibly, entirely independent of whether
+                # AirPlay was ever used on this zone -- so while idle,
+                # this zone must not touch the Cast device (no
+                # update_status(), no launch, nothing) at all.
+                last_healthy = time.time()
+                continue
+
             try:
                 cast.media_controller.update_status()
                 state = cast.media_controller.status.player_state
@@ -585,23 +620,6 @@ class CastZoneWorker:
                 continue
 
             if state in ("PLAYING", "BUFFERING"):
-                last_healthy = time.time()
-                continue
-
-            if not has_writer:
-                # No active AirPlay session on this zone right now —
-                # IDLE is the expected resting state here, not a
-                # stall. The previous version of this loop treated
-                # "not PLAYING" as "broken, reconnect" unconditionally,
-                # which meant it kept forcing a brand-new HTTP
-                # connection and ffmpeg process every
-                # STALL_TOLERANCE_SECONDS, forever, even when a zone
-                # was simply idle all day with nobody AirPlaying to
-                # it. Each of those connections then blocked forever
-                # waiting on PCM that was never coming (nothing was
-                # playing), and nothing ever cleaned them up — that's
-                # the actual mechanism behind the multi-gigabyte
-                # memory growth reported after ~a day of uptime.
                 last_healthy = time.time()
                 continue
 
