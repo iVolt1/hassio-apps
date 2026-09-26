@@ -14,12 +14,6 @@ A collection of Home Assistant addons for advanced audio and home automation.
 
 ## Addons
 
-### Pulse Audio Stereo Pairs
-
-Automatically creates PulseAudio stereo pair remap sinks for multi-channel audio devices. Supports hot-plug and integrates with the Music Assistant Pulse Audio Out provider.
-
-[Read more](pulse_audio_stereo_pairs/README.md)
-
 ## Support
 
-For help and discussion visit the [Home Assistant Community thread](https://community.home-assistant.io/t/homepod-connect-spotify-on-homepods-with-spotify-connect/482227).
+For help and discussion visit 
