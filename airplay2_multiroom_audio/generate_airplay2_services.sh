@@ -438,6 +438,22 @@ while read -r sink; do
     current_log=$player_log
     current_udp_base=$UDP_PORT_BASE
 
+    # Per-zone user overrides, spliced into the general block below via
+    # libconfig's @include. Lives in persistent /config storage and is
+    # never overwritten once it exists, so settings such as
+    # audio_backend_latency_offset_in_seconds survive restarts. The file
+    # must always exist: a missing @include target stops shairport-sync
+    # from parsing its config.
+    custom_file="${CONFIG_DIR}/${friendly_name}-ap2.custom"
+    if [ ! -f "${custom_file}" ]; then
+        cat > "${custom_file}" <<'EOF'
+// Per-zone shairport-sync overrides, included inside general = { ... }
+// Example:
+// audio_backend_latency_offset_in_seconds = -0.15;
+EOF
+        echo "Created ${custom_file}" >> "$log_file"
+    fi
+
     cat > "${config_file}" <<EOF
 general :
 {
@@ -447,6 +463,7 @@ general :
   output_backend = "pulseaudio";
   udp_port_base = ${current_udp_base};
   mdns_backend = "avahi";
+  @include "${custom_file}"
 };
 sessioncontrol :
 {
