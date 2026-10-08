@@ -2,7 +2,7 @@
 
 A collection of Home Assistant addons for advanced audio and home automation.
 
-[![Add this repository to your Home Assistant instance.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FiVolt1%2Fhassio_apps)
+[![Add this repository to your Home Assistant instance.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FiVolt1%2Fhassio-apps)
 
 ## Installation
 
@@ -12,7 +12,7 @@ The quickest way is the button above. To add the repository by hand:
 2. Click the menu (⋮) in the top right and select **Repositories**
 3. Add the following URL:
    ```
-   https://github.com/iVolt1/hassio_apps
+   https://github.com/iVolt1/hassio-apps
    ```
 4. The addons will appear in the store under **iVolt1 Home Assistant Addons**
 
