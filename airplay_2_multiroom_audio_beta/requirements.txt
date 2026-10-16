@@ -1,0 +1,8 @@
+# For cast_bridge_manager.py's Cast device discovery. This addon runs
+# a real avahi-daemon (see generate_airplay2_services.sh) for AirPlay
+# 2's own mDNS needs, but pychromecast's discovery uses its own
+# zeroconf-based backend regardless — no conflict between the two,
+# they're independent client-side lookups against the same LAN
+# multicast traffic.
+pychromecast>=14.0.0
+zeroconf>=0.130.0
