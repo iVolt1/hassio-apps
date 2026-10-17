@@ -190,6 +190,60 @@ def list_remap_sinks():
     return names
 
 
+def bounce_and_recreate_remaps(wanted):
+    """After a PulseAudio restart a master sink can look fine (IDLE) while its
+    ALSA device never reopens, so nothing is audible. Same fix as the addon's
+    boot-time step: suspend/resume each master sink once, then reload each
+    remap module with its original arguments. `wanted` is the list of zone
+    sink names; other remap sinks are left alone."""
+    try:
+        res = subprocess.run(["pactl", "list", "modules"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("pactl list modules failed: %s", e)
+        return
+    if res.returncode != 0:
+        log.warning("pactl list modules exited %d: %s", res.returncode, res.stderr.strip())
+        return
+
+    mods, idx, is_remap = [], None, False
+    for line in res.stdout.splitlines():
+        m = re.match(r"Module #(\d+)", line)
+        if m:
+            idx, is_remap = m.group(1), False
+        elif re.match(r"\s*Name:\s*module-remap-sink\s*$", line):
+            is_remap = True
+        elif is_remap and re.match(r"\s*Argument:", line):
+            mods.append((idx, line.split("Argument:", 1)[1].strip()))
+            is_remap = False
+
+    def run(*cmd):
+        r = subprocess.run(["pactl", *cmd], capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            log.warning("pactl %s failed: %s", " ".join(cmd[:2]), r.stderr.strip())
+        return r.returncode == 0
+
+    bounced = set()
+    for idx, args in mods:
+        sink = re.search(r"sink_name=(\S+)", args)
+        master = re.search(r"master=(\S+)", args)
+        if not sink or sink.group(1) not in wanted:
+            continue
+        try:
+            if master and master.group(1) not in bounced:
+                bounced.add(master.group(1))
+                log.info("Bouncing master sink %s (underlies %s)", master.group(1), sink.group(1))
+                run("suspend-sink", master.group(1), "1")
+                time.sleep(0.5)
+                run("suspend-sink", master.group(1), "0")
+            log.info("Recreating remap sink %s (module #%s)", sink.group(1), idx)
+            run("unload-module", idx)
+            time.sleep(0.2)
+            run("load-module", "module-remap-sink", args)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("Bounce/recreate of %s failed: %s", sink.group(1), e)
+
+
 _warned_skips = set()
 
 
@@ -376,6 +430,10 @@ class Manager:
                 self.recover |= set(self.zones)
                 for s in list(self.zones):
                     self.zones.pop(s).stop()
+                self.stop_event.wait(2)   # let PulseAudio finish loading its cards
+                bounce_and_recreate_remaps(desired)
+                names = list_remap_sinks() or names
+                desired = zone_sinks(names)
                 add = [s for s in desired if s not in self.zones]
                 remove = []
         if self.recover:
