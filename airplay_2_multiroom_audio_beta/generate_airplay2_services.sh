@@ -28,6 +28,14 @@ log_file="/config/shairport-sync/logs/generate_airplay2_services.log"
 mkdir -p "$(dirname "$log_file")"
 echo "# AirPlay 2 services generated on $(date)" > "$log_file"
 
+# This script runs once per container start (S6_STAGE2_HOOK), before any
+# service does, so it is the place to start the long-running managers' logs
+# fresh. Their run scripts append (>>) so that an s6 restart of a crashed
+# manager keeps the earlier output.
+mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
+: > /config/shairport-sync/logs/sink_zone_manager.log
+: > /config/cast-bridge/logs/cast_bridge_manager.log
+
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
 CONTENTS_DIR="${BASE_DIR}/user/contents.d"
 CONFIG_DIR="/config/shairport-sync/config"
