@@ -82,6 +82,18 @@ HTTP_PORT_MAP_FILE = CASTBRIDGE_DIR / "http_port_map.txt"
 PIPE_DIR = Path("/media/music/castbridge")
 
 AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
+
+# shairport-sync's own verbosity (-v / -vv / -vvv), from the add-on's
+# "log_level" option. Falls back to -vv, which is what it always used.
+OPTIONS_FILE = Path(os.environ.get("CAST_OPTIONS_FILE", "/data/options.json"))
+
+
+def shairport_verbosity() -> str:
+    try:
+        level = json.loads(OPTIONS_FILE.read_text()).get("log_level", "vv")
+    except (OSError, ValueError, AttributeError):
+        level = "vv"
+    return "-" + level if level in ("v", "vv", "vvv") else "-vv"
 DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("CAST_DISCOVERY_TIMEOUT", "10"))
 
 # How long to listen for existing _airplay._tcp mDNS advertisers before
@@ -263,6 +275,17 @@ def discover_chromecasts():
     return casts
 
 
+_logs_opened = set()
+
+
+def open_log(path):
+    """Truncate a log the first time this process opens it, append after that
+    (so a respawned worker keeps what led up to its crash)."""
+    mode = "ab" if path in _logs_opened else "wb"
+    _logs_opened.add(path)
+    return open(path, mode)
+
+
 def start_shairport(name: str, fifo: str, port: int, udp_port_base: int) -> subprocess.Popen:
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
     if not os.path.exists(fifo):
@@ -303,9 +326,9 @@ pipe :
 """)
 
     log.info("Starting shairport-sync for '%s' on port %d -> %s", name, port, fifo)
-    log_fh = open(log_file, "ab")
+    log_fh = open_log(log_file)
     return subprocess.Popen(
-        ["shairport-sync", "-a", name, "-p", str(port), "-c", str(config_file), "-vv"],
+        ["shairport-sync", "-a", name, "-p", str(port), "-c", str(config_file), shairport_verbosity()],
         stdout=log_fh, stderr=subprocess.STDOUT,
     )
 
@@ -313,7 +336,7 @@ pipe :
 def start_bridge_worker(zone: dict) -> subprocess.Popen:
     LOG_DIR_CB = CASTBRIDGE_DIR / "logs"
     LOG_DIR_CB.mkdir(parents=True, exist_ok=True)
-    log_fh = open(LOG_DIR_CB / f"{safe_name(zone['name'])}-bridge.log", "ab")
+    log_fh = open_log(LOG_DIR_CB / f"{safe_name(zone['name'])}-bridge.log")
     return subprocess.Popen(
         [sys.executable, "/usr/sbin/cast_bridge_zone.py", json.dumps(zone)],
         stdout=log_fh, stderr=subprocess.STDOUT,
