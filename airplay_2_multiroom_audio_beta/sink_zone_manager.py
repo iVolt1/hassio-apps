@@ -29,11 +29,13 @@ What it does
         Assistant player and settings, stay the same
   * Restarts a shairport-sync that exits unexpectedly, with backoff.
 
-Live updates are OFF until the flag file below exists, so a new build can
-first be run as a dry run: the log says what the manager WOULD do when the
-sink set changes, without touching any zone.
-
-    <CONFIG_DIR>/sink_zone_live      (create the empty file to enable)
+Bluetooth speakers need no remap sink: every connected Bluetooth A2DP
+sink gets a zone of its own, named after the speaker's alias (the sink's
+Description), unless a remap sink already sits on top of it, in which case
+that remap sink is the zone. After a PulseAudio restart (`ha audio
+restart`) the manager bounces the master sinks, reloads the remap modules
+and restarts every zone, because the old shairport-sync processes hold
+dead connections to the old server.
 
 What stays in generate_airplay2_services.sh: the one-time dbus / avahi /
 nqptp / cast-bridge services and, before any of this starts, the master
@@ -64,7 +66,6 @@ CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/confi
 LOG_DIR = Path(os.environ.get("SZM_LOG_DIR", "/config/shairport-sync/logs"))
 PORT_MAP_FILE = CONFIG_DIR / "port_map.txt"
 PORT_MAP_LOCK_FILE = CONFIG_DIR / ".port_map.lock"
-LIVE_FLAG_FILE = CONFIG_DIR / "sink_zone_live"
 
 AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
 
@@ -203,21 +204,18 @@ def list_remap_sinks():
     return names
 
 
-def bounce_and_recreate_remaps(wanted):
-    """After a PulseAudio restart a master sink can look fine (IDLE) while its
-    ALSA device never reopens, so nothing is audible. Same fix as the addon's
-    boot-time step: suspend/resume each master sink once, then reload each
-    remap module with its original arguments. `wanted` is the list of zone
-    sink names; other remap sinks are left alone."""
+def remap_modules():
+    """[(module_index, argument_string)] for every module-remap-sink, or None
+    if pactl could not be queried."""
     try:
         res = subprocess.run(["pactl", "list", "modules"], capture_output=True,
                              text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning("pactl list modules failed: %s", e)
-        return
+        return None
     if res.returncode != 0:
         log.warning("pactl list modules exited %d: %s", res.returncode, res.stderr.strip())
-        return
+        return None
 
     mods, idx, is_remap = [], None, False
     for line in res.stdout.splitlines():
@@ -229,6 +227,49 @@ def bounce_and_recreate_remaps(wanted):
         elif is_remap and re.match(r"\s*Argument:", line):
             mods.append((idx, line.split("Argument:", 1)[1].strip()))
             is_remap = False
+    return mods
+
+
+BT_SINK_RE = re.compile(r"^bluez_(sink|output)\.")
+BT_NOT_A2DP_RE = re.compile(r"headset|hsp|hfp|handsfree", re.I)
+
+
+def bluetooth_sinks():
+    """{pulse sink name: Description (the speaker's alias)} for connected
+    Bluetooth A2DP output sinks, or None if pactl could not be queried."""
+    try:
+        res = subprocess.run(["pactl", "list", "sinks"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("pactl list sinks failed: %s", e)
+        return None
+    if res.returncode != 0:
+        log.warning("pactl list sinks exited %d: %s", res.returncode, res.stderr.strip())
+        return None
+    found, name = {}, None
+    for line in res.stdout.splitlines():
+        if line.startswith("Sink #"):
+            name = None
+        m = re.match(r"\s*Name:\s*(\S+)", line)
+        if m:
+            name = m.group(1)
+            continue
+        m = re.match(r"\s*Description:\s*(.+?)\s*$", line)
+        if m and name and BT_SINK_RE.match(name) and not BT_NOT_A2DP_RE.search(name):
+            found[name] = m.group(1)
+            name = None
+    return found
+
+
+def bounce_and_recreate_remaps(wanted):
+    """After a PulseAudio restart a master sink can look fine (IDLE) while its
+    ALSA device never reopens, so nothing is audible. Same fix as the addon's
+    boot-time step: suspend/resume each master sink once, then reload each
+    remap module with its original arguments. `wanted` is the list of zone
+    sink names; other remap sinks are left alone."""
+    mods = remap_modules()
+    if mods is None:
+        return
 
     def run(*cmd):
         r = subprocess.run(["pactl", *cmd], capture_output=True, text=True, timeout=15)
@@ -279,9 +320,14 @@ def zone_sinks(names):
 
 # -- one zone -----------------------------------------------------------
 class Zone:
-    def __init__(self, sink: str, rtsp_port: int, udp_base: int):
+    def __init__(self, sink: str, rtsp_port: int, udp_base: int,
+                 pa_sink: str = None, display_name: str = None):
+        # `sink` is the zone's key (file names, port_map.txt). It is the
+        # PulseAudio sink name for a remap sink; a Bluetooth zone is keyed by
+        # its alias instead and names the real sink in `pa_sink`.
         self.sink = sink
-        self.display_name = sink.replace("_", " ")
+        self.pa_sink = pa_sink or sink
+        self.display_name = display_name or sink.replace("_", " ")
         self.rtsp_port = rtsp_port
         self.udp_base = udp_base
         self.config_file = CONFIG_DIR / f"{sink}-ap2.conf"
@@ -306,10 +352,12 @@ class Zone:
             log.info("Created %s", self.custom_file)
 
     def _write_config(self):
+        # Escape for a libconfig string (an alias may contain " or \).
+        name = self.display_name.replace("\\", "\\\\").replace('"', '\\"')
         self.config_file.write_text(f"""\
 general :
 {{
-  name = "{self.display_name}";
+  name = "{name}";
   port = {self.rtsp_port};
   interface = "{AIRPLAY_INTERFACE}";
   output_backend = "pulseaudio";
@@ -328,7 +376,7 @@ diagnostics :
 }};
 pulseaudio :
 {{
-  sink = "{self.sink}";
+  sink = "{self.pa_sink}";
   application_name = "Shairport Sync";
 }};
 """)
@@ -344,7 +392,7 @@ pulseaudio :
             open(self.log_file, "wb").close()
         with open(self.log_file, "ab") as fh:
             fh.write(f"{time.strftime('%a %b %d %H:%M:%S %Z %Y')} - Starting AirPlay 2 receiver: "
-                     f"{self.display_name} for {self.sink} on port {self.rtsp_port}\n".encode())
+                     f"{self.display_name} for {self.pa_sink} on port {self.rtsp_port}\n".encode())
             fh.flush()
             self.proc = subprocess.Popen(
                 ["shairport-sync", "-a", self.display_name, "-p", str(self.rtsp_port),
@@ -353,7 +401,7 @@ pulseaudio :
         self.started_at = time.time()
         self.dead_noted = False
         log.info("Started zone '%s' (sink %s, port %d, udp %d, pid %d)",
-                 self.display_name, self.sink, self.rtsp_port, self.udp_base, self.proc.pid)
+                 self.display_name, self.pa_sink, self.rtsp_port, self.udp_base, self.proc.pid)
 
     def terminate(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -400,13 +448,13 @@ class Manager:
         self.zones = {}        # sink name -> Zone (running)
         self.udp_bases = {}    # sink name -> udp base, kept across stop/start
         self.booted = False
-        self.last_diff_logged = None
+        self.bt_defs = {}      # zone key -> (pulse sink, display name), Bluetooth zones
+        self.bt_noted = set()
         self.stop_event = threading.Event()
         self.change_event = threading.Event()
         self.last_sink_event = 0.0
         self.pactl_subscribe = None
         self.pulse_restarted = False   # set when the PulseAudio connection dropped
-        self.recover = set()           # zones to restart when their sink returns
 
     def _udp_base_for(self, sink: str) -> int:
         if sink not in self.udp_bases:
@@ -421,15 +469,47 @@ class Manager:
         if re.search(r"\s", sink):
             log.warning("Skipping sink '%s': whitespace in the name breaks port_map.txt", sink)
             return
-        zone = Zone(sink, assign_rtsp_port(sink), self._udp_base_for(sink))
+        pa_sink, display = self.bt_defs.get(sink, (None, None))
+        zone = Zone(sink, assign_rtsp_port(sink), self._udp_base_for(sink), pa_sink, display)
         zone.start(fresh=True)
         self.zones[sink] = zone
+
+    def _desired(self, names):
+        """Zone keys that should be running: the remap sinks, plus one zone per
+        connected Bluetooth sink that has no remap sink on top of it."""
+        remap = zone_sinks(names)
+        mods = remap_modules()
+        bt = bluetooth_sinks()
+        if mods is None or bt is None:
+            # Cannot tell; do not tear down Bluetooth zones over a pactl hiccup.
+            return remap + [k for k in self.zones if k in self.bt_defs and k not in remap]
+        masters = set()
+        for _, args in mods:
+            m = re.search(r"master=(\S+)", args)
+            if m:
+                masters.add(m.group(1))
+        keys = []
+        for pa_name, alias in bt.items():
+            key = re.sub(r"[^A-Za-z0-9_-]+", "_", alias).strip("_") or pa_name
+            if pa_name in masters:
+                if pa_name not in self.bt_noted:
+                    self.bt_noted.add(pa_name)
+                    log.info("Bluetooth sink %s ('%s') has a remap sink on top of it; "
+                             "that remap sink is its zone", pa_name, alias)
+                continue
+            if key in remap or key in keys:
+                log.warning("Bluetooth sink %s: zone name '%s' is already taken, skipping",
+                            pa_name, key)
+                continue
+            self.bt_defs[key] = (pa_name, alias)
+            keys.append(key)
+        return remap + keys
 
     def reconcile(self):
         names = list_remap_sinks()
         if names is None:
             return
-        desired = zone_sinks(names)
+        desired = self._desired(names)
         add = [s for s in desired if s not in self.zones]
         remove = [s for s in self.zones if s not in desired]
 
@@ -437,51 +517,29 @@ class Manager:
             self.pulse_restarted = False
             if self.booted:
                 # Running shairport-sync processes still hold connections to the
-                # old PulseAudio server and make no sound. Restart them all;
-                # this is recovery, so it does not depend on the live flag.
+                # old PulseAudio server and make no sound. Restart them all.
                 log.warning("PulseAudio was restarted: restarting %d zone(s)", len(self.zones))
-                self.recover |= set(self.zones)
                 for s in list(self.zones):
                     self.zones.pop(s).stop()
                 self.stop_event.wait(2)   # let PulseAudio finish loading its cards
                 bounce_and_recreate_remaps(desired)
                 names = list_remap_sinks() or names
-                desired = zone_sinks(names)
+                desired = self._desired(names)
                 add = [s for s in desired if s not in self.zones]
                 remove = []
-        if self.recover:
-            back = [s for s in add if s in self.recover]
-            for s in back:
-                log.info("Restarting zone '%s' after the PulseAudio restart", s)
-                self._start_zone(s)
-                add.remove(s)
-            self.recover -= set(back)
 
         if not self.booted:
             self.booted = True
             if not desired:
-                log.warning("No remap sinks found at startup. Watching for new ones.")
+                log.warning("No remap or Bluetooth sinks found at startup. Watching for new ones.")
             for s in add:
                 self._start_zone(s)
-            log.info("Started %d zone(s). Supervising%s.", len(self.zones),
-                     "" if LIVE_FLAG_FILE.exists() else
-                     f" (live sink updates are OFF: create {LIVE_FLAG_FILE} to enable)")
+            log.info("Started %d zone(s). Supervising.", len(self.zones))
             return
 
         if not add and not remove:
-            self.last_diff_logged = None
             return
 
-        diff = (tuple(add), tuple(remove))
-        if not LIVE_FLAG_FILE.exists():
-            if diff != self.last_diff_logged:
-                self.last_diff_logged = diff
-                log.info("DRY RUN: sink set changed, would start %s and stop %s. "
-                         "Create %s to apply sink changes live.", add or "nothing",
-                         remove or "nothing", LIVE_FLAG_FILE)
-            return
-
-        self.last_diff_logged = None
         log.info("Sink set changed: starting %s, stopping %s", add or "nothing", remove or "nothing")
         for s in remove:
             self.zones.pop(s).stop()
