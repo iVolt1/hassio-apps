@@ -47,6 +47,7 @@ every read-modify-write of that file happens under one shared flock.
 """
 
 import fcntl
+import json
 import logging
 import os
 import re
@@ -66,6 +67,18 @@ PORT_MAP_LOCK_FILE = CONFIG_DIR / ".port_map.lock"
 LIVE_FLAG_FILE = CONFIG_DIR / "sink_zone_live"
 
 AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
+
+# shairport-sync's own verbosity (-v / -vv / -vvv), from the add-on's
+# "log_level" option. Falls back to -vv, which is what it always used.
+OPTIONS_FILE = Path(os.environ.get("SZM_OPTIONS_FILE", "/data/options.json"))
+
+
+def shairport_verbosity() -> str:
+    try:
+        level = json.loads(OPTIONS_FILE.read_text()).get("log_level", "vv")
+    except (OSError, ValueError, AttributeError):
+        level = "vv"
+    return "-" + level if level in ("v", "vv", "vvv") else "-vv"
 
 # Same starting points the shell generator used. Cast zones use 5150+ /
 # 6800+, so the two ranges only meet if there are a lot of zones, and
@@ -335,7 +348,7 @@ pulseaudio :
             fh.flush()
             self.proc = subprocess.Popen(
                 ["shairport-sync", "-a", self.display_name, "-p", str(self.rtsp_port),
-                 "-c", str(self.config_file), "-vv"],
+                 "-c", str(self.config_file), shairport_verbosity()],
                 stdout=fh, stderr=subprocess.STDOUT)
         self.started_at = time.time()
         self.dead_noted = False
@@ -551,7 +564,8 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: mgr.stop_event.set())
 
-    log.info("sink_zone_manager starting (interface %s)", AIRPLAY_INTERFACE)
+    log.info("sink_zone_manager starting (interface %s, shairport-sync %s)",
+             AIRPLAY_INTERFACE, shairport_verbosity())
     mgr.run()
 
 
