@@ -67,7 +67,10 @@ LOG_DIR = Path(os.environ.get("SZM_LOG_DIR", "/config/shairport-sync/logs"))
 PORT_MAP_FILE = CONFIG_DIR / "port_map.txt"
 PORT_MAP_LOCK_FILE = CONFIG_DIR / ".port_map.lock"
 
-AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
+# Set by generate_airplay2_services.sh from the default-route interface (or an
+# AIRPLAY_INTERFACE override). Empty means "not restricted": no interface line
+# is written to the zone configs and shairport-sync picks its own.
+AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "")
 
 # shairport-sync's own verbosity (-v / -vv / -vvv), from the add-on's
 # "log_level" option. Falls back to -vv, which is what it always used.
@@ -354,13 +357,13 @@ class Zone:
     def _write_config(self):
         # Escape for a libconfig string (an alias may contain " or \).
         name = self.display_name.replace("\\", "\\\\").replace('"', '\\"')
+        iface_line = f'  interface = "{AIRPLAY_INTERFACE}";\n' if AIRPLAY_INTERFACE else ""
         self.config_file.write_text(f"""\
 general :
 {{
   name = "{name}";
   port = {self.rtsp_port};
-  interface = "{AIRPLAY_INTERFACE}";
-  output_backend = "pulseaudio";
+{iface_line}  output_backend = "pulseaudio";
   udp_port_base = {self.udp_base};
   mdns_backend = "avahi";
   @include "{self.custom_file}"
@@ -623,7 +626,7 @@ def main():
         signal.signal(sig, lambda *_: mgr.stop_event.set())
 
     log.info("sink_zone_manager starting (interface %s, shairport-sync %s)",
-             AIRPLAY_INTERFACE, shairport_verbosity())
+             AIRPLAY_INTERFACE or "unrestricted", shairport_verbosity())
     mgr.run()
 
 
