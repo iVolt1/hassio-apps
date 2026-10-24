@@ -81,7 +81,10 @@ HTTP_PORT_MAP_FILE = CASTBRIDGE_DIR / "http_port_map.txt"
 # actually part of the config-mismatch problem.
 PIPE_DIR = Path("/media/music/castbridge")
 
-AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
+# Set by generate_airplay2_services.sh from the default-route interface (or an
+# AIRPLAY_INTERFACE override). Empty means "not restricted": no interface line
+# is written to the zone configs and shairport-sync picks its own.
+AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "")
 
 # shairport-sync's own verbosity (-v / -vv / -vvv), from the add-on's
 # "log_level" option. Falls back to -vv, which is what it always used.
@@ -295,13 +298,13 @@ def start_shairport(name: str, fifo: str, port: int, udp_port_base: int) -> subp
     log_file = LOG_DIR / f"{name}-ap2.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    iface_line = f'  interface = "{AIRPLAY_INTERFACE}";\n' if AIRPLAY_INTERFACE else ""
     config_file.write_text(f"""\
 general :
 {{
   name = "{name}";
   port = {port};
-  interface = "{AIRPLAY_INTERFACE}";
-  output_backend = "pipe";
+{iface_line}  output_backend = "pipe";
   udp_port_base = {udp_port_base};
   mdns_backend = "avahi";
   audio_backend_buffer_desired_length_in_seconds = 0.1;
