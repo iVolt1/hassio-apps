@@ -44,7 +44,19 @@ mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 # Needed early (before the avahi service block below) so avahi-daemon can
 # be restricted to this interface at startup — see the airplay2-avahi
 # service comment for why that restriction matters.
-AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
+# Order of precedence: an AIRPLAY_INTERFACE override, else the interface carrying
+# the default route (lowest metric), read from /proc/net/route so no extra tools
+# are needed. If neither yields a name it stays empty: avahi is then left
+# unrestricted (one pinned to a name that doesn't exist is worse), and the
+# managers are not given AIRPLAY_INTERFACE, so they keep their own built-in default.
+if [ -z "${AIRPLAY_INTERFACE:-}" ]; then
+    AIRPLAY_INTERFACE="$(awk 'NR>1 && $2=="00000000" {print $7, $1}' /proc/net/route 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2)"
+fi
+if [ -n "${AIRPLAY_INTERFACE}" ]; then
+    AIRPLAY_INTERFACE_EXPORT="export AIRPLAY_INTERFACE=\"${AIRPLAY_INTERFACE}\""
+else
+    AIRPLAY_INTERFACE_EXPORT=""
+fi
 
 # --- Bounce master sinks & recreate remap sinks before generating zone services ----------------
 # HDMI (and some other ALSA-card) sinks don't resume cleanly on their own
@@ -289,7 +301,7 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
 awk -v iface="${AIRPLAY_INTERFACE}" '
     /^allow-interfaces=/ { next }
     /^host-name=/ { next }
-    /^\[server\]/ { print; print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
+    /^\[server\]/ { print; if (iface != "") print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
     { print }
 ' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
     mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
@@ -329,8 +341,12 @@ if [ ! -d "$CASTBRIDGE_MANAGER_SERVICE" ]; then
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-dbus"
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-avahi"
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-nqptp"
-    cat > "${CASTBRIDGE_MANAGER_SERVICE}/run" <<'EOF'
+    # Unquoted heredoc on purpose, like the sink zone manager's: the detected
+    # interface is baked in. Before this, the cast manager never received
+    # AIRPLAY_INTERFACE and always used its own built-in default.
+    cat > "${CASTBRIDGE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
+${AIRPLAY_INTERFACE_EXPORT}
 mkdir -p /config/cast-bridge/logs
 exec python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
 EOF
@@ -350,7 +366,7 @@ if [ ! -d "$SINK_ZONE_MANAGER_SERVICE" ]; then
     # same way it was baked into each zone's generated config before.
     cat > "${SINK_ZONE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
-export AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE}"
+${AIRPLAY_INTERFACE_EXPORT}
 mkdir -p /config/shairport-sync/logs
 exec python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sync/logs/sink_zone_manager.log 2>&1
 EOF
