@@ -330,7 +330,8 @@ class Zone:
         # its alias instead and names the real sink in `pa_sink`.
         self.sink = sink
         self.pa_sink = pa_sink or sink
-        self.display_name = display_name or sink.replace("_", " ")
+        self.default_name = display_name or sink.replace("_", " ")
+        self.display_name = self.default_name
         self.rtsp_port = rtsp_port
         self.udp_base = udp_base
         self.config_file = CONFIG_DIR / f"{sink}-ap2.conf"
@@ -351,18 +352,38 @@ class Zone:
             self.custom_file.write_text(
                 "// Per-zone shairport-sync overrides, included inside general = { ... }\n"
                 "// Example:\n"
-                "// audio_backend_latency_offset_in_seconds = -0.15;\n")
+                "// audio_backend_latency_offset_in_seconds = -0.15;\n"
+                "// To rename the zone, set name here; do not define the other\n"
+                "// generated settings (port, interface, ...), libconfig rejects duplicates:\n"
+                "// name = \"Kitchen\";\n")
             log.info("Created %s", self.custom_file)
 
+    def _custom_name(self):
+        # libconfig rejects a setting that is defined twice, so a `name = "...";`
+        # in the custom file cannot simply sit next to the generated one (that
+        # is a fatal "duplicate setting name"). Instead it replaces it: the
+        # custom name becomes the zone's name, here and on the command line.
+        try:
+            m = re.search(r'^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"\s*;',
+                          self.custom_file.read_text(), re.M)
+        except OSError:
+            return None
+        return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
+
     def _write_config(self):
-        # Escape for a libconfig string (an alias may contain " or \).
-        name = self.display_name.replace("\\", "\\\\").replace('"', '\\"')
+        override = self._custom_name()
+        self.display_name = override or self.default_name
+        if override:
+            name_line = ""   # the custom file supplies `name`
+        else:
+            # Escape for a libconfig string (an alias may contain " or \).
+            escaped = self.display_name.replace("\\", "\\\\").replace('"', '\\"')
+            name_line = f'  name = "{escaped}";\n'
         iface_line = f'  interface = "{AIRPLAY_INTERFACE}";\n' if AIRPLAY_INTERFACE else ""
         self.config_file.write_text(f"""\
 general :
 {{
-  name = "{name}";
-  port = {self.rtsp_port};
+{name_line}  port = {self.rtsp_port};
 {iface_line}  output_backend = "pulseaudio";
   udp_port_base = {self.udp_base};
   mdns_backend = "avahi";
