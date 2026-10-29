@@ -5,6 +5,17 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- A zone's name can be set in its `<zone>-ap2.custom` file with `name = "...";`. It
+  replaces the generated name instead of duplicating it, which shairport-sync rejects
+  as a fatal "duplicate setting name". The name also changes the zone's AirPlay 2
+  device ID, so Music Assistant sees it as a new player.
+
+### Changed
+- On every container start, all generated zone configs (`*-ap2.conf`) and all logs
+  (`*.log` under `/config/shairport-sync/logs` and `/config/cast-bridge/logs`) are
+  deleted. The `*-ap2.custom` overrides, `port_map.txt` and `http_port_map.txt` are kept.
+
 ### Fixed
 - Duplicate PulseAudio remap sinks (names ending in `.2`, `.3`) and the duplicate
   `airplay2-<name>.2` zones they produced. Two overlapping runs of the service
@@ -14,7 +25,9 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Zones registering over and over (`AVAHI_CLIENT_S_COLLISION` / "needs a rename") because
   the add-on's avahi daemon listened on every host interface, including the hassio bridge,
   docker0 and the veth pairs. It is now restricted to the LAN interface
-  (`AIRPLAY_INTERFACE`, default `enp5s0`) and uses its own mDNS host name, `airplay2-multiroom`.
+  and uses its own mDNS host name, `airplay2-multiroom`. The interface is found from the
+  default route, not hardcoded; `AIRPLAY_INTERFACE` overrides it, and if none is found
+  avahi is left unrestricted.
 - HDMI-backed zones that stayed silent after the receiver or TV was power-cycled. Master
   sinks are suspended and resumed at startup so PulseAudio reopens the ALSA device.
 
