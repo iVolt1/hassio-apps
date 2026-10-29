@@ -25,7 +25,11 @@ fi
 
 echo "$(date) — generate_airplay2_services.sh started" >> /tmp/airplay2_gen_debug.log
 log_file="/config/shairport-sync/logs/generate_airplay2_services.log"
-mkdir -p "$(dirname "$log_file")"
+mkdir -p "$(dirname "$log_file")" /config/cast-bridge/logs
+# Start every container start with clean logs: remove all of the previous
+# run's logs (zone, manager, bridge and this generator's own) so leftovers from
+# zones that no longer exist don't pile up. The log below is created after this.
+find /config/shairport-sync/logs /config/cast-bridge/logs -type f -name '*.log' -delete
 echo "# AirPlay 2 services generated on $(date)" > "$log_file"
 
 # This script runs once per container start (S6_STAGE2_HOOK), before any
@@ -40,6 +44,12 @@ BASE_DIR="/etc/s6-overlay/s6-rc.d"
 CONTENTS_DIR="${BASE_DIR}/user/contents.d"
 CONFIG_DIR="/config/shairport-sync/config"
 mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
+
+# Remove the generated shairport-sync configs. Both managers rewrite a zone's
+# <name>-ap2.conf every time it starts, so these only ever hold stale zones.
+# Kept on purpose: the <name>-ap2.custom files (per-zone overrides, reused),
+# port_map.txt (stable ports) and its lock file.
+find "${CONFIG_DIR}" -maxdepth 1 -type f -name '*-ap2.conf' -delete
 
 # Needed early (before the avahi service block below) so avahi-daemon can
 # be restricted to this interface at startup — see the airplay2-avahi
