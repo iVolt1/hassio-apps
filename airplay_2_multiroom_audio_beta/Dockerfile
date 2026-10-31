@@ -3,7 +3,7 @@ RUN apk add --no-cache build-base git autoconf automake libtool pkgconfig
 WORKDIR /tmp
 RUN git clone https://github.com/mikebrady/nqptp.git && \
     cd nqptp && \
-    git switch development && \
+    #git switch development && \
     sed -i 's|#include <linux/if_packet.h>|#include <netpacket/packet.h>|' nqptp-utilities.c && \
     autoreconf -fi && \
     CFLAGS="-DCONFIG_FOR_LINUX" ./configure && \
@@ -19,7 +19,7 @@ RUN apk add --no-cache \
 WORKDIR /tmp
 RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
     cd shairport-sync-ap2 && \
-    git switch development && \
+    #git switch development && \
     autoreconf -fi && \
     ./configure \
         --prefix=/usr \
