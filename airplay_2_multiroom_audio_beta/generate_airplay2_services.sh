@@ -62,6 +62,77 @@ find "${CONFIG_DIR}" -maxdepth 1 -type f -name '*-ap2.conf' -delete
 if [ -z "${AIRPLAY_INTERFACE:-}" ]; then
     AIRPLAY_INTERFACE="$(awk 'NR>1 && $2=="00000000" {print $7, $1}' /proc/net/route 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2)"
 fi
+# --- Optional: own LAN IP in a private network namespace (ap2_ip) -------
+# Music Assistant's cliairplay (also host_network:true on this host) binds
+# UDP 319/320 for its own PTP engine, and so does nqptp here -- whichever
+# starts second gets EADDRINUSE, and cliairplay then falls back to NTP,
+# which shairport-sync rejects for AirPlay 2 (RTSP 501). Ports are per
+# network namespace, so when ap2_ip is set, avahi, nqptp and both zone
+# managers (and every shairport-sync/ffmpeg they spawn) run inside netns
+# "ap2" on a macvlan with its own LAN IP, while MA keeps the host's.
+# dbus stays in the host namespace: its socket is a filesystem path, which
+# works across network namespaces (same for the PulseAudio socket).
+#
+# A macvlan's parent host cannot reach the macvlan itself, so a second
+# macvlan ("ap2shim") with its own IP is added on the HOST side plus a /32
+# route, so MA on this same host can reach the zones and hear their mDNS.
+# The shim lives in the host namespace and survives addon restarts; it is
+# deleted and recreated here every start (and stays until reboot if the
+# addon is uninstalled).
+#
+# Any failure cleans up and falls back to the normal host-network mode.
+NETNS_EXEC=""
+AP2_OPTS=/data/options.json
+AP2_IP="$(jq -r '.ap2_ip // empty' "$AP2_OPTS" 2>/dev/null)"
+if [ -n "$AP2_IP" ]; then
+    AP2_NS=ap2
+    AP2_GW="$(jq -r '.ap2_gateway // empty' "$AP2_OPTS")"
+    AP2_MAC="$(jq -r '.ap2_mac // empty' "$AP2_OPTS")"
+    AP2_SHIM_IP="$(jq -r '.ap2_shim_ip // empty' "$AP2_OPTS")"
+    AP2_PARENT="${AIRPLAY_INTERFACE}"
+
+    ap2_cleanup() {
+        ip netns del "$AP2_NS" 2>/dev/null
+        ip link del ap2mv 2>/dev/null
+        ip link del ap2shim 2>/dev/null
+    }
+
+    ap2_setup() {
+        [ -n "$AP2_PARENT" ] || { echo "ap2: no parent interface detected"; return 1; }
+        ip netns list >/dev/null 2>&1 || { echo "ap2: 'ip' has no netns support (busybox ip? install iproute2)"; return 1; }
+        ap2_cleanup
+        ip netns add "$AP2_NS" || return 1
+        # shellcheck disable=SC2086
+        ip link add ap2mv link "$AP2_PARENT" ${AP2_MAC:+address $AP2_MAC} type macvlan mode bridge || return 1
+        ip link set ap2mv netns "$AP2_NS" || return 1
+        ip -n "$AP2_NS" link set lo up || return 1
+        ip -n "$AP2_NS" link set ap2mv up || return 1
+        ip -n "$AP2_NS" addr add "$AP2_IP" dev ap2mv || return 1
+        if [ -n "$AP2_GW" ]; then
+            ip -n "$AP2_NS" route add default via "$AP2_GW" || return 1
+        fi
+        if [ -n "$AP2_SHIM_IP" ]; then
+            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || return 1
+            ip addr add "${AP2_SHIM_IP%/*}/32" dev ap2shim || return 1
+            ip link set ap2shim up || return 1
+            ip route replace "${AP2_IP%/*}/32" dev ap2shim || return 1
+        else
+            echo "ap2: WARNING no ap2_shim_ip set -- Music Assistant on this host will NOT be able to reach ${AP2_IP%/*}"
+        fi
+        echo "ap2: netns ${AP2_NS} up -- ${AP2_IP} on ap2mv (parent ${AP2_PARENT}), shim ${AP2_SHIM_IP:-none}"
+        ip -n "$AP2_NS" addr show ap2mv
+        ip -n "$AP2_NS" route
+    }
+
+    if ap2_setup >> "$log_file" 2>&1; then
+        NETNS_EXEC="ip netns exec ${AP2_NS} "
+        AIRPLAY_INTERFACE=ap2mv
+    else
+        echo "ap2: setup FAILED -- falling back to host network mode (see errors above)" >> "$log_file"
+        ap2_cleanup
+    fi
+fi
+
 if [ -n "${AIRPLAY_INTERFACE}" ]; then
     AIRPLAY_INTERFACE_EXPORT="export AIRPLAY_INTERFACE=\"${AIRPLAY_INTERFACE}\""
 else
@@ -315,7 +386,7 @@ awk -v iface="${AIRPLAY_INTERFACE}" '
     { print }
 ' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
     mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
-exec avahi-daemon --no-drop-root --no-chroot -s
+exec ${NETNS_EXEC}avahi-daemon --no-drop-root --no-chroot -s
 EOF
     chmod +x "${AVAHI_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-avahi"
@@ -325,9 +396,10 @@ NQPTP_SERVICE="${BASE_DIR}/airplay2-nqptp"
 if [ ! -d "$NQPTP_SERVICE" ]; then
     mkdir -p "$NQPTP_SERVICE"
     echo "longrun" > "${NQPTP_SERVICE}/type"
-    cat > "${NQPTP_SERVICE}/run" <<'EOF'
+    # Unquoted heredoc (was 'EOF') so NETNS_EXEC is baked in.
+    cat > "${NQPTP_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
-exec nqptp
+exec ${NETNS_EXEC}nqptp
 EOF
     chmod +x "${NQPTP_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-nqptp"
@@ -358,7 +430,7 @@ if [ ! -d "$CASTBRIDGE_MANAGER_SERVICE" ]; then
 #!/usr/bin/with-contenv bashio
 ${AIRPLAY_INTERFACE_EXPORT}
 mkdir -p /config/cast-bridge/logs
-exec python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
+exec ${NETNS_EXEC}python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
 EOF
     chmod +x "${CASTBRIDGE_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-castbridge-manager"
@@ -378,7 +450,7 @@ if [ ! -d "$SINK_ZONE_MANAGER_SERVICE" ]; then
 #!/usr/bin/with-contenv bashio
 ${AIRPLAY_INTERFACE_EXPORT}
 mkdir -p /config/shairport-sync/logs
-exec python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sync/logs/sink_zone_manager.log 2>&1
+exec ${NETNS_EXEC}python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sync/logs/sink_zone_manager.log 2>&1
 EOF
     chmod +x "${SINK_ZONE_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-sink-zone-manager"
