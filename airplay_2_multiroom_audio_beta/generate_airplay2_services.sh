@@ -115,11 +115,18 @@ if [ -n "$AP2_IP" ]; then
             ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || return 1
             ip addr add "${AP2_SHIM_IP%/*}/32" dev ap2shim || return 1
             ip link set ap2shim up || return 1
-            ip route replace "${AP2_IP%/*}/32" dev ap2shim || return 1
+            # Send to the zones FROM the host's real IP (not the shim's), so
+            # the PTP/RTSP source matches the timing-peer IP cliairplay
+            # advertises; and route replies to the host IP back via the shim,
+            # since the macvlan parent can't receive frames from ap2mv.
+            AP2_HOST_IP="$(ip -4 -o addr show dev "$AP2_PARENT" | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+            [ -n "$AP2_HOST_IP" ] || { echo "ap2: could not read host IP on ${AP2_PARENT}"; return 1; }
+            ip route replace "${AP2_IP%/*}/32" dev ap2shim src "$AP2_HOST_IP" || return 1
+            ip -n "$AP2_NS" route add "${AP2_HOST_IP}/32" via "${AP2_SHIM_IP%/*}" dev ap2mv || return 1
         else
             echo "ap2: WARNING no ap2_shim_ip set -- Music Assistant on this host will NOT be able to reach ${AP2_IP%/*}"
         fi
-        echo "ap2: netns ${AP2_NS} up -- ${AP2_IP} on ap2mv (parent ${AP2_PARENT}), shim ${AP2_SHIM_IP:-none}"
+        echo "ap2: netns ${AP2_NS} up -- ${AP2_IP} on ap2mv (parent ${AP2_PARENT}), shim ${AP2_SHIM_IP:-none}, host ${AP2_HOST_IP:-n/a}"
         ip -n "$AP2_NS" addr show ap2mv
         ip -n "$AP2_NS" route
     }
