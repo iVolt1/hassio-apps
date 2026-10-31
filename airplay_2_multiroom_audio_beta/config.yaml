@@ -1,5 +1,5 @@
 name: Airplay2 Multiroom Audio Beta
-version: 0.104
+version: 0.105
 slug: airplay_2_multiroom_audio_beta
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
@@ -9,6 +9,13 @@ map:
   - addon_config:rw
   - media:rw
 host_network: true
+# NET_ADMIN/SYS_ADMIN + apparmor off: only needed for the optional ap2_ip
+# mode (own LAN IP in a private network namespace, so nqptp's UDP 319/320
+# doesn't collide with Music Assistant's cliairplay on the same host).
+privileged:
+  - NET_ADMIN
+  - SYS_ADMIN
+apparmor: false
 audio: true
 init: false
 startup: services
@@ -19,3 +26,7 @@ options:
   log_level: vv
 schema:
   log_level: list(v|vv|vvv)
+  ap2_ip: str?          # e.g. 192.168.1.60/24 — empty = run on the host IP as before
+  ap2_gateway: str?     # e.g. 192.168.1.1
+  ap2_mac: str?         # e.g. 02:aa:bb:cc:dd:01 (fixed MAC for a DHCP exclusion/ARP stability)
+  ap2_shim_ip: str?     # e.g. 192.168.1.61 — host-side shim so MA on this host can reach ap2_ip
