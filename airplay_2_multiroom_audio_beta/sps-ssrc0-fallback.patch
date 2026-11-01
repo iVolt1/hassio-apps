@@ -87,7 +87,7 @@ index c9fb19b..7c501b4 100644
              // now, do a modulo 2^23 unsigned int calculation to see if we may have overshot the
              // flushUntilSeq
 diff --git a/player.c b/player.c
-index 657eeaf..07ed254 100644
+index 657eeaf..963f533 100644
 --- a/player.c
 +++ b/player.c
 @@ -438,6 +438,7 @@ int ssrc_is_recognised(ssrc_t ssrc) {
@@ -147,7 +147,36 @@ index 657eeaf..07ed254 100644
    case ALAC_48000_S24_2:
      response = 352;
      break;
-@@ -1092,6 +1114,7 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
+@@ -570,6 +592,11 @@ int setup_software_resampler(rtsp_conn_info *conn, ssrc_t ssrc) {
+     conn->frames_per_packet = 352;
+     suggested_output_format = SPS_FORMAT_S24;
+     break;
++  case ALAC_44100_S24_2: // local patch
++    conn->input_rate = 44100;
++    conn->frames_per_packet = 352;
++    suggested_output_format = SPS_FORMAT_S24;
++    break;
+   case AAC_44100_F24_2:
+     conn->input_rate = 44100;
+     break;
+@@ -649,6 +676,7 @@ int setup_software_resampler(rtsp_conn_info *conn, ssrc_t ssrc) {
+ 
+     switch (ssrc) {
+     case ALAC_44100_S16_2:
++    case ALAC_44100_S24_2: // local patch
+     case ALAC_48000_S24_2: {
+       // seems as if the codec_context is correctly set up for ALAC but not for AAC-LC
+       input_format = conn->codec_context->sample_fmt;
+@@ -761,7 +789,7 @@ int setup_software_resampler(rtsp_conn_info *conn, ssrc_t ssrc) {
+       // this is important when it comes to deciding on dither
+       // AFAIK 24-bit ALAC comes out in 32-bit format but is actually 24 bit
+       // so don't dither if it is truncated from 32 to 24 bit
+-      if (ssrc == ALAC_48000_S24_2)
++      if ((ssrc == ALAC_48000_S24_2) || (ssrc == ALAC_44100_S24_2))
+         conn->input_effective_bit_depth = 24;
+       else
+         conn->input_effective_bit_depth = 32;
+@@ -1092,6 +1120,7 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
        int uncompressed_pcm = (conn->stream.type == ast_uncompressed);
        switch (ssrc) {
        case ALAC_44100_S16_2:
@@ -155,7 +184,7 @@ index 657eeaf..07ed254 100644
        case ALAC_48000_S24_2:
          // a classic stream announced as L16 (e.g. from pyatv/Home Assistant) carries
          // big-endian 16-bit PCM in the same 352-frame packets rather than ALAC
-@@ -1131,7 +1154,8 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
+@@ -1131,7 +1160,8 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
            conn->codec_context->channel_layout = AV_CH_LAYOUT_STEREO;
  #endif
            conn->codec_context->sample_rate = 44100;
@@ -165,7 +194,7 @@ index 657eeaf..07ed254 100644
            alac_ffmpeg_magic_cookie *extradata =
                malloc(sizeof(alac_ffmpeg_magic_cookie)); // might not use it
            if (extradata == NULL)
-@@ -1145,6 +1169,9 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
+@@ -1145,6 +1175,9 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
            if (ssrc == ALAC_48000_S24_2) {
              extradata->alac_config.bitDepth = 24; // Seems to be S24
              extradata->alac_config.sampleRate = htonl(48000);
@@ -175,7 +204,7 @@ index 657eeaf..07ed254 100644
            } else {
              extradata->alac_config.bitDepth = 16; // Seems to be S16
              extradata->alac_config.sampleRate = htonl(44100);
-@@ -1174,7 +1201,8 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
+@@ -1174,7 +1207,8 @@ void prepare_decoding_chain(rtsp_conn_info *conn, ssrc_t ssrc) {
        conn->input_rate = get_ssrc_rate(ssrc);
        debug(2, "Connection %d: set conn->input_rate: %u.", conn->connection_number,
              conn->input_rate);
@@ -185,6 +214,15 @@ index 657eeaf..07ed254 100644
          conn->frames_per_packet = 352;
        } else {
          conn->frames_per_packet = 1024;
+@@ -1512,7 +1546,7 @@ uint32_t player_put_packet(uint32_t ssrc, seq_t seqno, uint32_t actual_timestamp
+   uint64_t bitrate_generation = 0;
+   int measure_bitrate = config.metadata_enabled && conn->stream.type != ast_uncompressed &&
+                         (ssrc_is_aac(ssrc) || ssrc == ALAC_44100_S16_2 ||
+-                         ssrc == ALAC_48000_S24_2);
++                         ssrc == ALAC_44100_S24_2 || ssrc == ALAC_48000_S24_2);
+ #endif
+ 
+   // ignore a request to flush that has been made before the first packet...
 diff --git a/player.h b/player.h
 index 0a85216..dc20405 100644
 --- a/player.h
