@@ -15,7 +15,7 @@ RUN apk add --no-cache \
     build-base git autoconf automake libtool pkgconfig \
     libconfig-dev popt-dev openssl-dev soxr-dev pulseaudio-dev \
     avahi-dev libplist-dev libsodium-dev libgcrypt-dev \
-    util-linux-dev ffmpeg-dev xxd libplist-util ca-certificates
+    util-linux-dev ffmpeg-dev xxd libplist-util ca-certificates mosquitto-dev
 WORKDIR /tmp
 # Pinned to the 5.6.2 release, plus a local patch: for senders that send SSRC 0 on
 # buffered AirPlay 2 packets (Music Assistant's cliairplay), take the audio format from
@@ -34,6 +34,8 @@ RUN git clone --depth 1 --branch 5.6.2 https://github.com/mikebrady/shairport-sy
         --with-airplay-2 \
         --with-pulseaudio \
         --with-pipe \
+        --with-metadata \
+        --with-mqtt-client \
         CFLAGS="-DCONFIG_FOR_LINUX" && \
     make -j$(nproc) && \
     strip shairport-sync && \
@@ -52,7 +54,7 @@ RUN apk add -U -q --no-cache --no-progress \
     libconfig popt soxr openssl pulseaudio pulseaudio-utils \
     avahi dbus libplist libplist-util libsodium libgcrypt \
     util-linux ffmpeg-libs ffmpeg iproute2 libgcc libstdc++ bash curl \
-    python3 py3-pip
+    python3 py3-pip mosquitto-libs
 COPY --from=nqptp-builder /tmp/nqptp-install/usr/local/bin/nqptp /usr/local/bin/nqptp
 COPY --from=alpine-builder /tmp/shairport-ap2-install/usr/bin/shairport-sync /usr/bin/shairport-sync
 RUN mkdir -p /config/shairport-sync /config/cast-bridge /media/music/castbridge /run/dbus
