@@ -397,6 +397,7 @@ diagnostics :
 {{
   log_show_time_since_startup = "yes";
   log_show_time_since_last_message = "no";
+  statistics = "yes";
 }};
 pulseaudio :
 {{
