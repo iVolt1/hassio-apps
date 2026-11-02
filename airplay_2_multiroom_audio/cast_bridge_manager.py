@@ -32,11 +32,11 @@ ffmpeg/HTTP/Cast relay worker for each — no handoff file, no second
 addon, no path-mismatch risk.
 
 Each zone's shairport-sync RTSP port is persisted in the SAME
-port_map.txt that generate_airplay2_services.sh's PulseAudio-sink
-zones use (${CONFIG_DIR}/port_map.txt, "name port" per line) — reading
-and writing that shared file here, in the same plain-text format the
-shell script uses, means neither generator can ever hand out a port
-the other one already owns. This script's own separate HTTP stream
+port_map.txt that sink_zone_manager.py's PulseAudio-sink zones use
+(${CONFIG_DIR}/port_map.txt, "name port" per line) — reading and
+writing that shared file here, in the same plain-text format, under the
+same flock, means neither manager can ever hand out a port the other
+one already owns. This script's own separate HTTP stream
 ports are tracked in a small file of their own
 (${CASTBRIDGE_DIR}/http_port_map.txt), since nothing else needs those.
 
@@ -45,6 +45,7 @@ addon restart), same as before. Add a new Cast device -> restart this
 addon to pick it up.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -61,11 +62,15 @@ import zeroconf as zeroconf_lib
 log = logging.getLogger("cast_bridge_manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [castbridge-manager] %(levelname)s %(message)s")
 
-# Shared with generate_airplay2_services.sh's sink zones — same
-# directory, same port_map.txt format, so RTSP ports never collide.
+# Shared with sink_zone_manager.py's sink zones — same directory, same
+# port_map.txt format, so RTSP ports never collide.
 CONFIG_DIR = Path("/config/shairport-sync/config")
 LOG_DIR = Path("/config/shairport-sync/logs")
 PORT_MAP_FILE = CONFIG_DIR / "port_map.txt"
+# sink_zone_manager.py edits port_map.txt too and starts at the same time
+# as this service, so every read-modify-write of that file happens under
+# this one flock (same path in both files).
+PORT_MAP_LOCK_FILE = CONFIG_DIR / ".port_map.lock"
 
 # This script's own state, not shared with the shell generator.
 CASTBRIDGE_DIR = Path("/config/cast-bridge")
@@ -76,7 +81,22 @@ HTTP_PORT_MAP_FILE = CASTBRIDGE_DIR / "http_port_map.txt"
 # actually part of the config-mismatch problem.
 PIPE_DIR = Path("/media/music/castbridge")
 
-AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "enp5s0")
+# Set by generate_airplay2_services.sh from the default-route interface (or an
+# AIRPLAY_INTERFACE override). Empty means "not restricted": no interface line
+# is written to the zone configs and shairport-sync picks its own.
+AIRPLAY_INTERFACE = os.environ.get("AIRPLAY_INTERFACE", "")
+
+# shairport-sync's own verbosity (-v / -vv / -vvv), from the add-on's
+# "log_level" option. Falls back to -vv, which is what it always used.
+OPTIONS_FILE = Path(os.environ.get("CAST_OPTIONS_FILE", "/data/options.json"))
+
+
+def shairport_verbosity() -> str:
+    try:
+        level = json.loads(OPTIONS_FILE.read_text()).get("log_level", "vv")
+    except (OSError, ValueError, AttributeError):
+        level = "vv"
+    return "-" + level if level in ("v", "vv", "vvv") else "-vv"
 DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("CAST_DISCOVERY_TIMEOUT", "10"))
 
 # How long to listen for existing _airplay._tcp mDNS advertisers before
@@ -120,6 +140,15 @@ def is_port_available(port: int) -> bool:
 
 
 # -- shared port_map.txt (bash-format "name port" lines) --------------
+def lock_port_map():
+    """Takes the exclusive flock shared with sink_zone_manager.py and
+    returns the open file; closing it releases the lock."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fh = open(PORT_MAP_LOCK_FILE, "w")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
 def load_name_port_map(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -249,6 +278,17 @@ def discover_chromecasts():
     return casts
 
 
+_logs_opened = set()
+
+
+def open_log(path):
+    """Truncate a log the first time this process opens it, append after that
+    (so a respawned worker keeps what led up to its crash)."""
+    mode = "ab" if path in _logs_opened else "wb"
+    _logs_opened.add(path)
+    return open(path, mode)
+
+
 def start_shairport(name: str, fifo: str, port: int, udp_port_base: int) -> subprocess.Popen:
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
     if not os.path.exists(fifo):
@@ -258,13 +298,13 @@ def start_shairport(name: str, fifo: str, port: int, udp_port_base: int) -> subp
     log_file = LOG_DIR / f"{name}-ap2.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    iface_line = f'  interface = "{AIRPLAY_INTERFACE}";\n' if AIRPLAY_INTERFACE else ""
     config_file.write_text(f"""\
 general :
 {{
   name = "{name}";
   port = {port};
-  interface = "{AIRPLAY_INTERFACE}";
-  output_backend = "pipe";
+{iface_line}  output_backend = "pipe";
   udp_port_base = {udp_port_base};
   mdns_backend = "avahi";
   audio_backend_buffer_desired_length_in_seconds = 0.1;
@@ -289,9 +329,9 @@ pipe :
 """)
 
     log.info("Starting shairport-sync for '%s' on port %d -> %s", name, port, fifo)
-    log_fh = open(log_file, "ab")
+    log_fh = open_log(log_file)
     return subprocess.Popen(
-        ["shairport-sync", "-a", name, "-p", str(port), "-c", str(config_file), "-vv"],
+        ["shairport-sync", "-a", name, "-p", str(port), "-c", str(config_file), shairport_verbosity()],
         stdout=log_fh, stderr=subprocess.STDOUT,
     )
 
@@ -299,7 +339,7 @@ pipe :
 def start_bridge_worker(zone: dict) -> subprocess.Popen:
     LOG_DIR_CB = CASTBRIDGE_DIR / "logs"
     LOG_DIR_CB.mkdir(parents=True, exist_ok=True)
-    log_fh = open(LOG_DIR_CB / f"{safe_name(zone['name'])}-bridge.log", "ab")
+    log_fh = open_log(LOG_DIR_CB / f"{safe_name(zone['name'])}-bridge.log")
     return subprocess.Popen(
         [sys.executable, "/usr/sbin/cast_bridge_zone.py", json.dumps(zone)],
         stdout=log_fh, stderr=subprocess.STDOUT,
@@ -313,6 +353,10 @@ def main():
 
     casts = discover_chromecasts()
 
+    # Held from here until the map is saved below, so sink_zone_manager.py
+    # cannot add a zone between our load and our save (which would then
+    # be overwritten by our stale copy).
+    port_map_lock_fh = lock_port_map()
     port_map = load_name_port_map(PORT_MAP_FILE)
     http_port_map = load_name_port_map(HTTP_PORT_MAP_FILE)
 
@@ -357,6 +401,7 @@ def main():
 
     save_name_port_map(PORT_MAP_FILE, port_map)
     save_name_port_map(HTTP_PORT_MAP_FILE, http_port_map)
+    port_map_lock_fh.close()  # releases the flock
 
     if not zones:
         log.warning("No Cast devices to bridge. Idling — restart this addon after your "
