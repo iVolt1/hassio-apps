@@ -15,11 +15,15 @@ RUN apk add --no-cache \
     build-base git autoconf automake libtool pkgconfig \
     libconfig-dev popt-dev openssl-dev soxr-dev pulseaudio-dev \
     avahi-dev libplist-dev libsodium-dev libgcrypt-dev \
-    util-linux-dev ffmpeg-dev xxd libplist-util ca-certificates
+    util-linux-dev ffmpeg-dev xxd libplist-util ca-certificates mosquitto-dev
 WORKDIR /tmp
-RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
+# Pinned to the 5.6.2 release, plus a local patch: for senders that send SSRC 0 on
+# buffered AirPlay 2 packets (Music Assistant's cliairplay), take the audio format from
+# the stream SETUP's audioFormat instead. See mikebrady/shairport-sync#2319.
+COPY sps-ssrc0-fallback.patch /tmp/sps-ssrc0-fallback.patch
+RUN git clone --depth 1 --branch 5.6.2 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
     cd shairport-sync-ap2 && \
-    git switch development && \
+    git apply /tmp/sps-ssrc0-fallback.patch && \
     autoreconf -fi && \
     ./configure \
         --prefix=/usr \
@@ -30,6 +34,8 @@ RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2
         --with-airplay-2 \
         --with-pulseaudio \
         --with-pipe \
+        --with-metadata \
+        --with-mqtt-client \
         CFLAGS="-DCONFIG_FOR_LINUX" && \
     make -j$(nproc) && \
     strip shairport-sync && \
@@ -48,7 +54,7 @@ RUN apk add -U -q --no-cache --no-progress \
     libconfig popt soxr openssl pulseaudio pulseaudio-utils \
     avahi dbus libplist libplist-util libsodium libgcrypt \
     util-linux ffmpeg-libs ffmpeg iproute2 libgcc libstdc++ bash curl \
-    python3 py3-pip
+    python3 py3-pip mosquitto-libs
 COPY --from=nqptp-builder /tmp/nqptp-install/usr/local/bin/nqptp /usr/local/bin/nqptp
 COPY --from=alpine-builder /tmp/shairport-ap2-install/usr/bin/shairport-sync /usr/bin/shairport-sync
 RUN mkdir -p /config/shairport-sync /config/cast-bridge /media/music/castbridge /run/dbus
@@ -63,6 +69,7 @@ COPY generate_airplay2_services.sh /usr/sbin/generate_airplay2_services.sh
 COPY run_stage2_hooks.sh /usr/sbin/run_stage2_hooks.sh
 COPY cast_bridge_manager.py /usr/sbin/cast_bridge_manager.py
 COPY cast_bridge_zone.py /usr/sbin/cast_bridge_zone.py
+COPY sink_zone_manager.py /usr/sbin/sink_zone_manager.py
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
              /usr/sbin/run_stage2_hooks.sh
 ENV S6_STAGE2_HOOK=/usr/sbin/run_stage2_hooks.sh
