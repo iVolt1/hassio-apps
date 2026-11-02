@@ -1,0 +1,7 @@
+configuration:
+  log_level:
+    name: shairport-sync log level
+    description: >-
+      Verbosity of the per-zone shairport-sync logs. v is the least detailed,
+      vv (the default) adds more, and vvv is the most detailed and grows the
+      logs fastest. Restart the add-on after changing it.
