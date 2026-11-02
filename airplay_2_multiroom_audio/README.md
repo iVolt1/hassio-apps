@@ -1,110 +1,122 @@
 # AirPlay 2 Multiroom Audio
 
-Turn your existing PulseAudio-backed audio hardware **and** your Google Cast (Chromecast/Google Home) speakers into AirPlay 2 receivers, so you can play to all of them — individually or grouped — from any AirPlay 2 source (iPhone, iPad, Mac).
-
-This addon merges what used to be two separate things — AirPlay 2 receivers for local sound cards, and a bridge that relays AirPlay 2 audio to Google Cast devices — into a single Home Assistant addon.
+Turn the audio outputs on your Home Assistant host (sound cards, USB DACs, HDMI, Bluetooth speakers) **and** your Google Cast speakers into AirPlay 2 receivers. Play to them one at a time or grouped from an iPhone, iPad or Mac, or use them as players in [Music Assistant](https://music-assistant.io), including synchronized multi-room playback with PTP timing.
 
 ## What it does
 
-- Scans your system's PulseAudio sinks and creates an [AirPlay 2](https://github.com/mikebrady/shairport-sync) receiver (via `shairport-sync`) for each one, so each physical output (a zone, a room, a card's channel pair) shows up as its own AirPlay 2 speaker.
-- Scans your network for Google Cast devices (speakers, speaker groups/stereo pairs, Cast-enabled soundbars) and creates a matching AirPlay 2 receiver for each one too, relaying the audio through to Cast — so devices that don't natively speak AirPlay 2 still show up as AirPlay 2 speakers.
-- Skips any Cast device that's already advertising its own, real AirPlay 2 receiver (some TVs and soundbars have this built in) — it's detected automatically, not configured by name, so you never end up with two entries for the same physical device.
-- All AirPlay 2 zones — sink-backed and Cast-backed alike — support AirPlay 2's native multi-room grouping, so you can select several speakers at once from your source device.
-- This addon doesn't limit you to just the zones it creates: any other AirPlay 2 receiver already on your network (a HomePod, a smart TV, a soundbar with AirPlay 2 built in, another addon's receivers) shows up in your source's AirPlay picker right alongside this addon's zones, and can be grouped together with them the same way, since AirPlay 2 multi-room isn't specific to this addon — it's a standard feature of the protocol itself.
+- **One AirPlay 2 zone per PulseAudio remap sink.** Each zone is a [shairport-sync](https://github.com/mikebrady/shairport-sync) receiver named after its remap sink, so each room or channel pair appears as its own AirPlay 2 speaker.
+- **Bluetooth speakers become zones automatically.** A connected Bluetooth (A2DP) speaker gets its own zone, named after the speaker, with no remap sink needed.
+- **Zones follow your hardware while running.** When a sink appears or disappears (a Bluetooth speaker connects or drops, a USB DAC is plugged in, a remap sink is recreated), its zone starts or stops within a few seconds. A returning zone keeps its port and AirPlay 2 device ID, so it comes back as the same player.
+- **Google Cast speakers get AirPlay 2 zones too.** Every Cast speaker, group or stereo pair found on the network gets a zone that relays the audio to it. Cast devices that already have a real AirPlay 2 receiver of their own are skipped automatically.
+- **Optional own LAN IP.** The zones can run on their own IP address, so Music Assistant on the same host can use AirPlay 2 with PTP timing. Without it, the two compete for the same PTP ports. See [Running on the same host as Music Assistant](#running-on-the-same-host-as-music-assistant).
+- **Standard AirPlay 2 grouping.** Any other AirPlay 2 receiver on your network (HomePods, TVs, other add-ons) can be grouped with these zones from your source device.
 
 ## Requirements
 
-- A Home Assistant host with PulseAudio already set up and your sound hardware's sinks configured (see **Setting up a new zone** below).
-- `host_network: true` — this addon needs real access to your LAN for AirPlay 2 (mDNS/Bonjour) and Cast device discovery to work.
-- Google Cast devices must be on the same network/VLAN as the Home Assistant host; discovery relies on mDNS, which typically doesn't cross VLANs without an mDNS reflector.
+- Home Assistant OS or Supervised, with PulseAudio sinks for your sound hardware (see [Setting up zones](#setting-up-zones)).
+- A wired network connection for the host if you use the own-IP option (macvlan doesn't work over Wi-Fi).
+- Cast devices on the same network/VLAN as the host. Discovery uses mDNS, which doesn't cross VLANs without a reflector.
 
-## Setting up a new zone
+**Permissions:** the add-on uses `host_network`, the `NET_ADMIN` and `SYS_ADMIN` privileges, and runs without AppArmor. The privileges are only used by the own-IP option, which creates a network namespace and macvlan interface; Home Assistant shows a lower security rating because of them.
 
-**Sink-backed zones (local sound cards, USB DACs, HDMI, Bluetooth speakers, etc.):** this addon only creates an AirPlay 2 zone for a PulseAudio sink that's a `module-remap-sink` — and it names the zone after that remap sink's own name, so the remap sink's name *is* what shows up in your AirPlay picker. A raw hardware sink on its own (even a plain stereo card with nothing multi-channel about it) won't be picked up until it has a remap sink built on top of it — this applies even when the remap sink would just be a 1:1, all-channels passthrough of the card. A Bluetooth speaker works the same way once it's paired and PulseAudio shows it as a sink; see **Using a Bluetooth speaker as a zone** under **Advanced**.
+## Configuration
 
-The recommended way to create these remap sinks is with the **Multi-room Audio Controller** addon, rather than creating them by hand with `pactl`. Add or rename a zone there, restart this addon afterward, and it'll pick up the new remap sink and create (or rename) the matching AirPlay 2 zone for it automatically.
+| Option | Default | Purpose |
+|---|---|---|
+| `log_level` | `vv` | shairport-sync log detail per zone: `v`, `vv` or `vvv`. `vvv` is for debugging and grows logs quickly. |
+| `ap2_ip` | empty | Own LAN address for the zones, with prefix, e.g. `192.168.1.60/24`. Empty = use the host's address. |
+| `ap2_gateway` | empty | The gateway your host uses, e.g. `192.168.1.1`. |
+| `ap2_mac` | empty | Fixed MAC for the own address, e.g. `02:aa:bb:cc:dd:01` (first byte `02` = locally administered). |
+| `ap2_shim_ip` | empty | A second free LAN address, e.g. `192.168.1.61`, used so apps on the host can reach the zones. |
 
-**Cast-backed zones (Google/Nest speakers, Cast groups, Cast-enabled soundbars):** nothing to configure — every Cast device found on the network gets its own AirPlay 2 zone automatically, unless it's already got a native AirPlay 2 receiver of its own (see above).
+Restart the add-on after changing any option.
 
-## Restarting
+## Running on the same host as Music Assistant
 
-Restart this addon whenever you:
-- Add, rename, or remove a PulseAudio remap sink.
-- Add or remove a Google Cast device on your network.
+AirPlay 2 timing (PTP) uses UDP ports 319 and 320. Music Assistant's AirPlay provider runs its own PTP clock on those ports, and so does this add-on's nqptp. With both on the host's address, whichever starts second can't bind them: Music Assistant then falls back to NTP timing, which these receivers reject for AirPlay 2, so you're limited to compatibility mode.
 
-A restart re-scans both PulseAudio and the network and regenerates the AirPlay 2 zone list to match. Zone names and their AirPlay 2 ports are persisted across restarts, so a zone's identity in your AirPlay picker stays stable — it won't reappear as a "new" device each time.
+Setting `ap2_ip` solves this. At startup the add-on creates a private network namespace with a macvlan interface on your LAN, gives it that address, and runs avahi, nqptp and all the zones inside it. Each side then has its own ports 319/320.
 
-If your AV receiver or a TV was power-cycled or had its HDMI cable unplugged, restarting this addon (or just waiting for its next scheduled restart) will also recover sinks that PulseAudio otherwise leaves silently stuck.
+1. Pick two free addresses on your LAN, outside your DHCP pool (or reserve them):
+   - one for the zones (`ap2_ip`, with `/24` or whatever prefix your network uses),
+   - one for the host-side shim (`ap2_shim_ip`).
+2. Set `ap2_gateway` to the gateway your host uses (`ip route show default` on the host).
+3. Optionally set `ap2_mac`.
+4. Restart the add-on.
 
-## Troubleshooting
+**Why the shim is needed:** a host cannot talk to its own macvlan interface directly. The add-on adds a second small macvlan on the host side with the shim address and routes the zones' address through it, so Music Assistant (and anything else on the host) can reach the zones and see their mDNS announcements. Traffic to the zones still leaves from the host's real address.
 
-Logs live under `/config/shairport-sync/logs/`:
+The zones are IPv4-only in this mode, so every sender (Music Assistant, iPhones) connects to them over IPv4.
 
-- `generate_airplay2_services.log` — what happened on the most recent sink scan/zone generation pass (which sinks were found, which ports were assigned, any sinks that had to be bounced/recreated).
-- `<zone name>-ap2.log` — each zone's own `shairport-sync` (AirPlay 2 receiver) log.
-- `cast_bridge_manager.log` — Cast device discovery and the overall status of each Cast Bridge zone's shairport-sync/relay process pair.
-- `<zone name>-bridge.log` (under `/config/cast-bridge/logs/`) — a Cast-backed zone's own relay log (its connection to the Cast device, playback start/stop).
-
-**A zone doesn't show up in your AirPlay picker:**
-- Sink-backed: confirm it's a `module-remap-sink` sink (`pactl list sinks short`) and check `generate_airplay2_services.log` for its name.
-- Cast-backed: check `cast_bridge_manager.log` for whether it was found on the last scan, and whether it was excluded as already having its own AirPlay 2 receiver.
-
-**No sound from a specific zone, but it shows up fine:** check that zone's own log (`-ap2.log` for sink zones, `-bridge.log` for Cast zones) for connection errors, then restart the addon.
-
-**A zone plays briefly then goes silent, or never recovers after a receiver/TV is power-cycled:** restart the addon — this forces PulseAudio to reopen the underlying hardware device.
-
-## Known limitations
-
-- The iOS Spotify app's own in-app device picker initially shows these zones as classic AirPlay-1-only, regardless of what they actually support. If you hit this, use iOS's system AirPlay picker instead (tap the AirPlay icon, or the status-bar clock/Dynamic Island while something is playing) to select the zone as full AirPlay 2 at least once — after that first play, Spotify's own picker seems to pick up on its real AirPlay 2 capability and shows it correctly from then on.
-- A brand-new Cast device or a renamed/removed one is only picked up on the next addon restart — there's no live rescanning while it's running.
-- Grouping a Cast-backed zone together with a sink-backed (true AirPlay 2) zone likely won't play in tight sync. Sink-backed zones stay tightly synced with each other because they share AirPlay 2's own timing protocol (PTP, via nqptp) directly. A Cast-backed zone's audio, by contrast, is relayed through to the Cast device rather than played by an AirPlay 2 receiver itself, so it picks up its own separate buffering/latency along the way — it should stay in sync with other Cast-backed zones reasonably well, but not with the sink-backed ones. If you're grouping across both kinds regularly, placing AP2 (sink-backed) speakers and Cast-backed speakers in different, separated areas of the house helps mask any drift between them.
-
-## Advanced
-
-### Custom `general` configuration per zone
-
-Each sink-backed zone's `shairport-sync` configuration is regenerated on every start, so edits made directly to `<zone name>-ap2.conf` are overwritten. To keep per-zone settings across restarts and updates, use the zone's custom file instead. It's what makes per-device tweaks possible, such as the latency offset a Bluetooth speaker or a Cast device needs to stay in sync with your other rooms (for Bluetooth, see **Using a Bluetooth speaker as a zone** below):
+**Checking it worked.** `generate_airplay2_services.log` should contain a line like:
 
 ```
-/config/shairport-sync/config/<zone name>-ap2.custom
+ap2: netns ap2 up -- 192.168.1.60/24 on ap2mv (parent enp5s0), shim 192.168.1.61, host 192.168.1.117
 ```
 
-(On Home Assistant this folder is the addon's config share, `addon_configs/<addon slug>/shairport-sync/config/`.)
+If setup fails at any step (wrong gateway, an address already in use, missing privileges), the log shows `ap2: setup FAILED` with the reason and the add-on starts normally on the host's address instead.
 
-- The file is created automatically on the first start after the zone exists, containing only comments, so it does nothing until you add settings to it. It is never overwritten once it exists, and one file is created per zone.
-- It is spliced into that zone's `general` block with libconfig's `@include`, so put only bare `general` settings in it, each ending with a semicolon. Don't add a `general = { ... }` wrapper, and don't use it for other groups such as `sessioncontrol` or `pulseaudio`.
-- Don't set anything the addon already writes into `general`: `name`, `port`, `interface`, `output_backend`, `udp_port_base`, or `mdns_backend`. A key defined twice stops that zone's `shairport-sync` from starting.
-- A syntax error in the file also stops that one zone from starting. The error appears in `<zone name>-ap2.log`.
-- Restart the addon after editing the file.
+## Setting up zones
 
-**Example: compensating for a Bluetooth speaker or a Cast device.** Both add delay of their own that AirPlay 2 doesn't know about, so they play late when grouped with your other rooms. To make one zone play 250 ms early, put this in that zone's `.custom` file and restart:
+**Sound cards, USB DACs and HDMI outputs.** The add-on creates a zone for every PulseAudio `module-remap-sink`, named after the remap sink. A raw hardware sink isn't picked up on its own; give it a remap sink, even a simple 1:1 passthrough. The easiest way to create and name remap sinks is the **Multi-room Audio Controller** add-on.
+
+**Bluetooth speakers.** Pair and connect the speaker on the host (see [Pairing a Bluetooth speaker](#pairing-a-bluetooth-speaker)). As soon as PulseAudio shows its A2DP sink, a zone appears, named after the speaker. If you'd rather control the name or channel layout, create a remap sink on top of the Bluetooth sink; the remap sink then becomes the zone instead.
+
+**Google Cast speakers.** Nothing to configure. Each Cast device found at startup gets a zone.
+
+### When to restart
+
+Sink-backed and Bluetooth zones are picked up while the add-on runs (it watches PulseAudio events and also re-checks every 30 seconds). Restart the add-on when you:
+
+- add, rename or remove a **Cast** device (Cast discovery only runs at startup),
+- change an add-on option or a zone's `.custom` file,
+- want to recover a sound card that stays silent after a receiver or TV was power-cycled (startup suspends and resumes each card so PulseAudio reopens it).
+
+Zone names and ports are stored in `port_map.txt` and survive restarts and updates, so each zone keeps the same AirPlay 2 identity.
+
+## Using the zones in Music Assistant
+
+Every zone appears in Music Assistant as an AirPlay player.
+
+- **With `ap2_ip` set:** leave the streaming mode on **Automatic**, or choose **AirPlay 2 - PTP timing**. Zones play natively over AirPlay 2 with PTP, including synchronized groups, track changes within a session and 24-bit sources.
+- **Without `ap2_ip` (MA on the same host):** set each player to **AirPlay 2 - compatibility mode** or **AirPlay 1 (RAOP)**.
+
+To change it, open the player in Music Assistant, turn on **Show advanced settings**, open the **AirPlay** protocol and pick a **Streaming mode**.
+
+Music Assistant may log `<zone> has not answered the server's PTP clock ... so it will not play any audio` for these zones. You can ignore it: nqptp follows Music Assistant's clock without sending replies, which that check doesn't expect, and playback works normally.
+
+**About the bundled shairport-sync.** The add-on builds shairport-sync 5.6.2 with a small compatibility patch (`sps-ssrc0-fallback.patch`) for how Music Assistant's AirPlay 2 sender currently streams buffered audio. Without it, zones would stay silent, go silent after a track change, or play static on 24-bit sources. Apple senders are not affected by the patch. Details are in the patch file and the [CHANGELOG](CHANGELOG.md).
+
+## Per-zone settings
+
+Each sink-backed or Bluetooth zone has an override file:
 
 ```
-audio_backend_latency_offset_in_seconds = -0.25;
+/addon_configs/<add-on slug>/shairport-sync/config/<zone>-ap2.custom
 ```
 
-The value is in seconds, and a negative value makes the zone play earlier. Because each zone has its own file, the offset applies only to that zone.
+- It's created on the first start after the zone appears, containing only comments, and is never overwritten.
+- Its contents are included inside the zone's `general` block, so add plain `general` settings, each ending with a semicolon. Don't add a `general = { ... }` wrapper or other groups.
+- `name = "...";` renames the zone. A renamed zone gets a new AirPlay 2 device ID, so Music Assistant sees it as a new player.
+- Don't set `port`, `interface`, `output_backend`, `udp_port_base` or `mdns_backend`: the add-on writes those, and a duplicate setting stops the zone from starting.
+- A syntax error stops only that zone; the error is in its `-ap2.log`.
+- Restart the add-on after editing.
 
-### Using a Bluetooth speaker as a zone
+**Example: latency offset for a Bluetooth zone.** Bluetooth adds roughly 100–300 ms of delay that AirPlay doesn't account for, so a Bluetooth zone plays late in a group. To make a zone play 200 ms earlier:
 
-A Bluetooth speaker can be an AirPlay 2 zone like any other output, as long as PulseAudio sees it as a sink and a remap sink has been built on top of it.
+```
+audio_backend_latency_offset_in_seconds = -0.2;
+```
 
-1. **Pair and connect the speaker on the host** with `bluetoothctl` (`pair`, `trust`, `connect`). `trust` lets the speaker reconnect on its own after a reboot or power cycle. Pairing keys are stored by BlueZ and survive reboots. See **Pairing walkthrough** below for the full steps.
-2. **Confirm PulseAudio created a sink for it.** `pactl list sinks short | grep bluez` should show something like `bluez_output.AA_BB_CC_DD_EE_FF.1` (PipeWire-pulse) or `bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink` (PulseAudio). If the speaker connects but no sink appears, check that its card is on the `a2dp-sink` profile (`pactl list cards short`, then `pactl set-card-profile <card> a2dp-sink`).
-3. **Create a remap sink on top of the Bluetooth sink** in the **Multi-room Audio Controller** addon, exactly as you would for a sound card (see **Setting up a new zone**).
-4. **Restart this addon** with the speaker connected. The zone is built from the remap sink, so it's only generated if the Bluetooth sink and its remap sink exist at that moment.
+To measure the delay, play a click track to the Bluetooth zone and a wired zone together, record both with your phone from an equal distance, and measure the gap between the clicks in an audio editor such as Audacity. Use that gap as a negative number of seconds and adjust until the clicks line up. With PTP timing, wired zones stay tightly in sync, so a Bluetooth offset is easier to hear and worth tuning.
 
-#### Pairing walkthrough
+## Pairing a Bluetooth speaker
 
-Pairing happens on the Home Assistant host itself, in a shell on the machine that has the Bluetooth adapter. It is not done inside this addon. The host needs a working Bluetooth adapter with BlueZ running, and PulseAudio's Bluetooth module (`module-bluetooth-discover` and `module-bluez5-discover`, or the PipeWire equivalent). You can confirm the modules are loaded with `pactl list modules short | grep blue`.
-
-**1. Open `bluetoothctl` and get the controller ready.**
+Pairing is done in a shell on the Home Assistant host, not inside the add-on. The host needs a working Bluetooth adapter with BlueZ, and PulseAudio's Bluetooth modules (`pactl list modules short | grep blue`).
 
 ```bash
 bluetoothctl
 ```
-
-At the `[bluetoothctl]>` prompt:
 
 ```
 power on
@@ -113,19 +125,7 @@ default-agent
 scan on
 ```
 
-If the controller shows up as `Powered: yes` and `Pairable: yes`, you're ready. If `power on` fails, check `rfkill list` for a blocked adapter (`sudo rfkill unblock bluetooth`).
-
-**2. Put the speaker in pairing mode.** This is usually a long press on its Bluetooth button until a light flashes. Make sure the speaker isn't currently connected to a phone or another device, because a connected speaker stops advertising and won't show up in the scan.
-
-**3. Find the speaker's address.** Watch the scan output for a line like:
-
-```
-[NEW] Device AA:BB:CC:DD:EE:FF Speaker Name
-```
-
-The `AA:BB:CC:DD:EE:FF` part is the speaker's address. If the scan is noisy, run `devices` once it settles to list what has been seen. Pressing Tab after `pair ` completes known addresses.
-
-**4. Pair, trust, and connect.**
+Put the speaker in pairing mode and make sure it isn't connected to a phone. When it appears as `[NEW] Device AA:BB:CC:DD:EE:FF Speaker Name`:
 
 ```
 pair AA:BB:CC:DD:EE:FF
@@ -135,49 +135,47 @@ scan off
 exit
 ```
 
-Some speakers ask for confirmation or a PIN during `pair`. Answer `yes` to a confirmation request, or try `0000` (or `1234`) for a PIN.
-
-**5. Check the result.**
+`trust` lets the speaker reconnect by itself after it powers off or the host reboots, and the zone comes back automatically when it does. Check the result with:
 
 ```bash
 bluetoothctl info AA:BB:CC:DD:EE:FF | grep -E "Paired|Trusted|Connected"
 pactl list sinks short | grep bluez
 ```
 
-You want `Paired: yes`, `Trusted: yes`, `Connected: yes`, and a `bluez_output...` or `bluez_sink...` entry in the sink list. The sink name contains the speaker's address and stays the same on every connection.
+**If it doesn't work:**
 
-**If something goes wrong:**
+- **Not found in the scan:** put the speaker back in pairing mode and disconnect it from other devices.
+- **`AuthenticationFailed` or a timeout:** `remove AA:BB:CC:DD:EE:FF`, then start again from `scan on`.
+- **Pairs but won't connect:** PulseAudio's Bluetooth modules aren't loaded or can't reach BlueZ; check `journalctl -u bluetooth -b`.
+- **Connected but no sink:** set the card to the A2DP profile: `pactl set-card-profile <card> a2dp-sink`.
 
-- **The speaker never appears in the scan:** re-trigger pairing mode (the speaker may time out after a minute or two), disconnect it from any other device, and run `scan on` again.
-- **`org.bluez.Error.AuthenticationFailed`, or pairing times out:** run `remove AA:BB:CC:DD:EE:FF`, put the speaker back in pairing mode, and start over from `scan on`.
-- **It pairs but `connect` fails (for example `br-connection-profile-unavailable`):** PulseAudio's Bluetooth modules probably aren't loaded or aren't talking to BlueZ. Check `pactl list modules short | grep blue` and `journalctl -u bluetooth -b`.
-- **It connects but there's no sink:** the card may be on the wrong profile. Run `pactl list cards short | grep bluez`, then `pactl set-card-profile <card name> a2dp-sink` (older versions call it `a2dp_sink`).
-- **The adapter's address changes after a replug or reboot:** BlueZ ties pairing keys to the adapter's address, so a different address means the speaker has to be paired again. Compare `bluetoothctl list` across a reboot to check. Some inexpensive USB adapters report a default address.
+## Logs and troubleshooting
 
-For more detail on `bluetoothctl` and BlueZ, the Arch Linux wiki's Bluetooth page (https://wiki.archlinux.org/title/Bluetooth) is a good general reference, and `man bluetoothctl` lists every command.
+Logs are in `/addon_configs/<add-on slug>/shairport-sync/logs/` and `.../cast-bridge/logs/`. They are cleared each time the add-on starts.
 
-**What happens when the speaker disconnects:** many speakers drop the link after a few minutes of silence, or when powered off or out of range. The Bluetooth sink disappears, and the remap sink built on it goes with it. When the speaker reconnects, the Bluetooth sink returns but the remap sink is not recreated automatically, and the zone's receiver is left pointing at a sink that no longer exists. Reconnect the speaker, make sure its remap sink is back, and restart this addon.
+| Log | Contents |
+|---|---|
+| `generate_airplay2_services.log` | Startup: own-IP setup (`ap2:` lines), sink cleanup and recreation |
+| `sink_zone_manager.log` | Zones starting, stopping and restarting as sinks come and go |
+| `<zone>-ap2.log` | One zone's shairport-sync |
+| `cast_bridge_manager.log` | Cast discovery and Cast zone status |
+| `<zone>-bridge.log` | One Cast zone's relay |
 
-**Latency and sync:** Bluetooth (A2DP) adds roughly 100–250 ms of delay that AirPlay 2 doesn't know about, so a Bluetooth zone plays late relative to the other rooms when grouped. Compensate for it with a negative latency offset in the zone's custom configuration (see **Custom `general` configuration per zone**, above). The delay depends on the codec (SBC vs AAC, for example) and can differ slightly between connections, so re-tune if the speaker changes codec or you notice drift after a reconnect.
+**A zone doesn't appear in the AirPlay picker.** Check `pactl list sinks short` for its remap or Bluetooth sink, then `sink_zone_manager.log`. For Cast zones, check `cast_bridge_manager.log` and restart the add-on.
 
-To measure the delay, play a click track (a short, sharp click once per second) to the Bluetooth zone and a non-Bluetooth zone at the same time and record both with your phone, standing about equidistant from the two. Zoom in on one click in an audio editor such as Audacity and measure the gap between the two onsets. Use that gap, as a negative number of seconds, as your starting offset, then re-record and adjust until the clicks merge into one.
+**Music Assistant can't reach the zones with `ap2_ip` set.** Confirm the `ap2: netns ap2 up` line. Then, on the host, `ip route get <ap2_ip address>` should show `dev ap2shim src <host IP>`.
 
-### Using and synchronizing the zones in Music Assistant
+**Zones keep renaming themselves, or registration collides.** Another add-on on the host is running its own avahi daemon with the same host name. This add-on should be the only avahi on the host; for example, set Music Assistant Local Audio's `server` option to a host or URL instead of `mdns:…`.
 
-Every zone this addon creates shows up in Music Assistant (MA) as an AirPlay player. MA chooses how to stream to it by default, but you can pick the streaming mode yourself, and that choice is the key to getting reliable playback and good sync when you play to several zones at once.
+**Silent after a receiver or TV was power-cycled.** Restart the add-on.
 
-**1. Show the advanced settings.** Open each of this addon's players in MA and turn on **Show advanced settings**. The streaming mode option stays hidden until you do, so repeat it for every player you want to configure.
+When reporting a problem, include the zone's `-ap2.log` and the output of `pactl list sinks short`.
 
-**2. Set the streaming mode.** In the player's **Configure AirPlay** section, make sure **Enable this protocol on this player** is ticked, then choose a **Streaming mode**:
+## Known limitations
 
-- **Automatic (recommended) [default]**: MA picks the mode itself.
-- **AirPlay 2 - PTP timing**
-- **AirPlay 2 - NTP timing**
-- **AirPlay 2 - compatibility mode**
-- **AirPlay 1 (RAOP)**
-
-For these zones, set the players to **AirPlay 2 - compatibility mode**, or use **AirPlay 1 (RAOP)** instead. Test a mode by playing to the zone, and by playing to a group of zones, before settling on it.
-
-**3. Play to one zone or several.** Select a single player in MA to play to one zone, or group several players and play to the group to hear them together. You can also group the zones from an iPhone, iPad, or Mac with AirPlay 2's own multi-room selection, as described at the top of this README.
-
-MA remembers each player's settings, including the streaming mode. Because this addon keeps each zone's name and AirPlay 2 port stable across restarts (see **Restarting**), the zone comes back as the same player and keeps its settings. If you rename a zone, MA treats it as a new player and its streaming mode returns to **Automatic**, so set it again.
+- **Cast discovery runs only at startup.** New, renamed or removed Cast devices need a restart.
+- **Cast zones don't sync tightly with sink zones.** Cast audio is relayed with its own buffering, so mixed groups can drift. Cast zones stay reasonably in sync with each other.
+- **The Spotify app's own device picker** shows these zones as AirPlay 1. Use the iOS system AirPlay picker (Control Center, or tap the Dynamic Island while audio is playing) for AirPlay 2.
+- **Spotify from an iPhone may stop after about 30 seconds** on some setups. This is under investigation; the log shows the iPhone ending the stream, not a receiver error. Music Assistant's own Spotify playback is not affected.
+- **24-bit from Music Assistant** is only used on the first session after its AirPlay provider starts. Later sessions use 16-bit, because that's what the zones advertise.
+- **Metadata and MQTT** are compiled into shairport-sync, but the add-on doesn't configure them yet.
