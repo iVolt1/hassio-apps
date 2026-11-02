@@ -25,22 +25,126 @@ fi
 
 echo "$(date) — generate_airplay2_services.sh started" >> /tmp/airplay2_gen_debug.log
 log_file="/config/shairport-sync/logs/generate_airplay2_services.log"
-mkdir -p "$(dirname "$log_file")"
+mkdir -p "$(dirname "$log_file")" /config/cast-bridge/logs
+# Start every container start with clean logs: remove all of the previous
+# run's logs (zone, manager, bridge and this generator's own) so leftovers from
+# zones that no longer exist don't pile up. The log below is created after this.
+find /config/shairport-sync/logs /config/cast-bridge/logs -type f -name '*.log' -delete
 echo "# AirPlay 2 services generated on $(date)" > "$log_file"
 
-is_port_available() {
-    ss -tuln | grep -q ":$1 " && return 1 || return 0
-}
+# This script runs once per container start (S6_STAGE2_HOOK), before any
+# service does, so it is the place to start the long-running managers' logs
+# fresh. Their run scripts append (>>) so that an s6 restart of a crashed
+# manager keeps the earlier output.
+mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
+: > /config/shairport-sync/logs/sink_zone_manager.log
+: > /config/cast-bridge/logs/cast_bridge_manager.log
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
 CONTENTS_DIR="${BASE_DIR}/user/contents.d"
 CONFIG_DIR="/config/shairport-sync/config"
 mkdir -p "${CONTENTS_DIR}" "${CONFIG_DIR}"
 
+# Remove the generated shairport-sync configs. Both managers rewrite a zone's
+# <name>-ap2.conf every time it starts, so these only ever hold stale zones.
+# Kept on purpose: the <name>-ap2.custom files (per-zone overrides, reused),
+# port_map.txt (stable ports) and its lock file.
+find "${CONFIG_DIR}" -maxdepth 1 -type f -name '*-ap2.conf' -delete
+
 # Needed early (before the avahi service block below) so avahi-daemon can
 # be restricted to this interface at startup — see the airplay2-avahi
 # service comment for why that restriction matters.
-AIRPLAY_INTERFACE="${AIRPLAY_INTERFACE:-enp5s0}"
+# Order of precedence: an AIRPLAY_INTERFACE override, else the interface carrying
+# the default route (lowest metric), read from /proc/net/route so no extra tools
+# are needed. If neither yields a name it stays empty: avahi is then left
+# unrestricted (one pinned to a name that doesn't exist is worse), and the
+# managers are not given AIRPLAY_INTERFACE, so they keep their own built-in default.
+if [ -z "${AIRPLAY_INTERFACE:-}" ]; then
+    AIRPLAY_INTERFACE="$(awk 'NR>1 && $2=="00000000" {print $7, $1}' /proc/net/route 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2)"
+fi
+# --- Optional: own LAN IP in a private network namespace (ap2_ip) -------
+# Music Assistant's cliairplay (also host_network:true on this host) binds
+# UDP 319/320 for its own PTP engine, and so does nqptp here -- whichever
+# starts second gets EADDRINUSE, and cliairplay then falls back to NTP,
+# which shairport-sync rejects for AirPlay 2 (RTSP 501). Ports are per
+# network namespace, so when ap2_ip is set, avahi, nqptp and both zone
+# managers (and every shairport-sync/ffmpeg they spawn) run inside netns
+# "ap2" on a macvlan with its own LAN IP, while MA keeps the host's.
+# dbus stays in the host namespace: its socket is a filesystem path, which
+# works across network namespaces (same for the PulseAudio socket).
+#
+# A macvlan's parent host cannot reach the macvlan itself, so a second
+# macvlan ("ap2shim") with its own IP is added on the HOST side plus a /32
+# route, so MA on this same host can reach the zones and hear their mDNS.
+# The shim lives in the host namespace and survives addon restarts; it is
+# deleted and recreated here every start (and stays until reboot if the
+# addon is uninstalled).
+#
+# Any failure cleans up and falls back to the normal host-network mode.
+NETNS_EXEC=""
+AP2_OPTS=/data/options.json
+AP2_IP="$(jq -r '.ap2_ip // empty' "$AP2_OPTS" 2>/dev/null)"
+if [ -n "$AP2_IP" ]; then
+    AP2_NS=ap2
+    AP2_GW="$(jq -r '.ap2_gateway // empty' "$AP2_OPTS")"
+    AP2_MAC="$(jq -r '.ap2_mac // empty' "$AP2_OPTS")"
+    AP2_SHIM_IP="$(jq -r '.ap2_shim_ip // empty' "$AP2_OPTS")"
+    AP2_PARENT="${AIRPLAY_INTERFACE}"
+
+    ap2_cleanup() {
+        ip netns del "$AP2_NS" 2>/dev/null
+        ip link del ap2mv 2>/dev/null
+        ip link del ap2shim 2>/dev/null
+    }
+
+    ap2_setup() {
+        [ -n "$AP2_PARENT" ] || { echo "ap2: no parent interface detected"; return 1; }
+        ip netns list >/dev/null 2>&1 || { echo "ap2: 'ip' has no netns support (busybox ip? install iproute2)"; return 1; }
+        ap2_cleanup
+        ip netns add "$AP2_NS" || return 1
+        # shellcheck disable=SC2086
+        ip link add ap2mv link "$AP2_PARENT" ${AP2_MAC:+address $AP2_MAC} type macvlan mode bridge || return 1
+        ip link set ap2mv netns "$AP2_NS" || return 1
+        ip -n "$AP2_NS" link set lo up || return 1
+        ip -n "$AP2_NS" link set ap2mv up || return 1
+        ip -n "$AP2_NS" addr add "$AP2_IP" dev ap2mv || return 1
+        if [ -n "$AP2_GW" ]; then
+            ip -n "$AP2_NS" route add default via "$AP2_GW" || return 1
+        fi
+        if [ -n "$AP2_SHIM_IP" ]; then
+            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || return 1
+            ip addr add "${AP2_SHIM_IP%/*}/32" dev ap2shim || return 1
+            ip link set ap2shim up || return 1
+            # Send to the zones FROM the host's real IP (not the shim's), so
+            # the PTP/RTSP source matches the timing-peer IP cliairplay
+            # advertises; and route replies to the host IP back via the shim,
+            # since the macvlan parent can't receive frames from ap2mv.
+            AP2_HOST_IP="$(ip -4 -o addr show dev "$AP2_PARENT" | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+            [ -n "$AP2_HOST_IP" ] || { echo "ap2: could not read host IP on ${AP2_PARENT}"; return 1; }
+            ip route replace "${AP2_IP%/*}/32" dev ap2shim src "$AP2_HOST_IP" || return 1
+            ip -n "$AP2_NS" route add "${AP2_HOST_IP}/32" via "${AP2_SHIM_IP%/*}" dev ap2mv || return 1
+        else
+            echo "ap2: WARNING no ap2_shim_ip set -- Music Assistant on this host will NOT be able to reach ${AP2_IP%/*}"
+        fi
+        echo "ap2: netns ${AP2_NS} up -- ${AP2_IP} on ap2mv (parent ${AP2_PARENT}), shim ${AP2_SHIM_IP:-none}, host ${AP2_HOST_IP:-n/a}"
+        ip -n "$AP2_NS" addr show ap2mv
+        ip -n "$AP2_NS" route
+    }
+
+    if ap2_setup >> "$log_file" 2>&1; then
+        NETNS_EXEC="ip netns exec ${AP2_NS} "
+        AIRPLAY_INTERFACE=ap2mv
+    else
+        echo "ap2: setup FAILED -- falling back to host network mode (see errors above)" >> "$log_file"
+        ap2_cleanup
+    fi
+fi
+
+if [ -n "${AIRPLAY_INTERFACE}" ]; then
+    AIRPLAY_INTERFACE_EXPORT="export AIRPLAY_INTERFACE=\"${AIRPLAY_INTERFACE}\""
+else
+    AIRPLAY_INTERFACE_EXPORT=""
+fi
 
 # --- Bounce master sinks & recreate remap sinks before generating zone services ----------------
 # HDMI (and some other ALSA-card) sinks don't resume cleanly on their own
@@ -215,69 +319,25 @@ while read -r remap_sink; do
     pactl load-module module-remap-sink $remap_args >> "$log_file" 2>&1
 done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
 
-# --- Persistent name -> port map ---------------------------------------
-# /etc/s6-overlay/s6-rc.d does NOT survive a container restart, so the
-# "service dir already exists, reuse its port" check below can never
-# actually fire on a fresh boot. Meanwhile shairport-sync derives each
-# zone's AirPlay 2 device ID from its instance name AND (per upstream
-# PR #2286) its RTSP port when instances share an address. That means
-# any time PORT_BASE's assignment depends on pactl's sink iteration
-# order (which is not guaranteed stable — remap sinks are created
-# dynamically by a separate addon), a zone's device ID can change
-# across a restart, which Music Assistant sees as a brand-new player
-# with default settings ("Streaming mode" resets to Automatic) plus an
-# orphaned leftover entry for the old ID.
+# --- Sink-backed zones are no longer generated here ---------------------
+# This script used to create one s6 service directory per remap sink. s6-rc
+# compiles its service database once, at container start, so a sink that
+# appeared or disappeared later (a Bluetooth speaker reconnecting, a USB
+# DAC being replugged) needed a full addon restart. sink_zone_manager.py
+# (started below as the "airplay2-sink-zone-manager" service) now owns
+# those zones the way cast_bridge_manager.py owns the Cast ones: it
+# starts one shairport-sync per module-remap-sink, restarts it if it
+# dies, and starts/stops zones as sinks come and go.
 #
-# Fix: persist the name -> port assignment to /config (this addon's
-# persistent per-addon storage, kept across restarts) and reuse it
-# forever, only falling forward to a new port for a given name if its
-# previously-recorded port is actually taken by something else at
-# generation time. This same file is also shared with
-# cast_bridge_manager.py's Cast Bridge zones below.
+# The persistent name -> port map moved there too (same port_map.txt,
+# same "name port" format, shared with cast_bridge_manager.py under a
+# flock). Keeping each zone's RTSP port stable is what keeps its AirPlay 2
+# device ID, and therefore its Music Assistant player and settings,
+# stable: shairport-sync derives the ID from the zone name and its port.
 #
-# That reuse check used to be is_port_available() alone -- whether the
-# OS currently has something bound to that port -- which only catches a
-# collision with an unrelated process, not with ANOTHER zone's own
-# persisted entry. At generation time every shairport-sync process is
-# typically down (mid-restart), so is_port_available() sees every port
-# as free regardless of what port_map.txt itself already says, and a
-# genuinely new zone's port scan can land squarely on a port some other
-# zone's own line already claims -- exactly the silent collision found
-# in production between "HD_Audio_Generic_Digital_Surround_7_1_HDMI_2_
-# rl_rr" and "Yamaha_TV", both persisted at port 5120: whichever zone's
-# shairport-sync actually starts first wins that port, and the other
-# fails to bind it and never comes up, with nothing in this script's own
-# log to say so. port_claimed_by_other() closes that gap by checking
-# port_map.txt's own entries directly, not just the OS's current bind
-# state.
-PORT_MAP_FILE="${CONFIG_DIR}/port_map.txt"
-touch "${PORT_MAP_FILE}"
-
-get_mapped_port() {
-    # Prints the persisted port for $1, or nothing if not yet assigned.
-    awk -v name="$1" '$1 == name { print $2; exit }' "${PORT_MAP_FILE}"
-}
-
-set_mapped_port() {
-    # Records name=$1 -> port=$2, replacing any prior entry for that name.
-    local tmp
-    tmp="$(mktemp)"
-    awk -v name="$1" '$1 != name' "${PORT_MAP_FILE}" > "$tmp"
-    echo "$1 $2" >> "$tmp"
-    mv "$tmp" "${PORT_MAP_FILE}"
-}
-
-port_claimed_by_other() {
-    # True (exit 0) if $1 is recorded in port_map.txt against some name
-    # OTHER than $2 -- i.e. this port is already owned by a different
-    # zone, regardless of whether that zone's process happens to be
-    # running (and therefore visible to is_port_available()) right now.
-    local port="$1" self_name="$2"
-    awk -v port="$port" -v self="$self_name" '
-        $2 == port && $1 != self { found=1 }
-        END { exit !found }
-    ' "${PORT_MAP_FILE}"
-}
+# Everything ABOVE this point still runs here, once, before any service
+# starts: the master-sink bounce, remap sink recreate and duplicate
+# cleanup, so the manager always sees remap sinks in their fresh state.
 
 # --- One-time, container-wide services: dbus -> avahi -> nqptp -> castbridge-manager ---
 DBUS_SERVICE="${BASE_DIR}/airplay2-dbus"
@@ -329,11 +389,11 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
 awk -v iface="${AIRPLAY_INTERFACE}" '
     /^allow-interfaces=/ { next }
     /^host-name=/ { next }
-    /^\[server\]/ { print; print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
+    /^\[server\]/ { print; if (iface != "") print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
     { print }
 ' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
     mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
-exec avahi-daemon --no-drop-root --no-chroot -s
+exec ${NETNS_EXEC}avahi-daemon --no-drop-root --no-chroot -s
 EOF
     chmod +x "${AVAHI_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-avahi"
@@ -343,9 +403,10 @@ NQPTP_SERVICE="${BASE_DIR}/airplay2-nqptp"
 if [ ! -d "$NQPTP_SERVICE" ]; then
     mkdir -p "$NQPTP_SERVICE"
     echo "longrun" > "${NQPTP_SERVICE}/type"
-    cat > "${NQPTP_SERVICE}/run" <<'EOF'
+    # Unquoted heredoc (was 'EOF') so NETNS_EXEC is baked in.
+    cat > "${NQPTP_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
-exec nqptp
+exec ${NETNS_EXEC}nqptp
 EOF
     chmod +x "${NQPTP_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-nqptp"
@@ -369,129 +430,35 @@ if [ ! -d "$CASTBRIDGE_MANAGER_SERVICE" ]; then
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-dbus"
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-avahi"
     touch "${CASTBRIDGE_MANAGER_SERVICE}/dependencies.d/airplay2-nqptp"
-    cat > "${CASTBRIDGE_MANAGER_SERVICE}/run" <<'EOF'
+    # Unquoted heredoc on purpose, like the sink zone manager's: the detected
+    # interface is baked in. Before this, the cast manager never received
+    # AIRPLAY_INTERFACE and always used its own built-in default.
+    cat > "${CASTBRIDGE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
+${AIRPLAY_INTERFACE_EXPORT}
 mkdir -p /config/cast-bridge/logs
-exec python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
+exec ${NETNS_EXEC}python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
 EOF
     chmod +x "${CASTBRIDGE_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-castbridge-manager"
 fi
 
-PORT_BASE=5120
-UDP_PORT_BASE=7001
-while :; do
-    is_port_available "$PORT_BASE" && break
-    PORT_BASE=$((PORT_BASE + 1))
-done
-
-while read -r sink; do
-    [[ -z "$sink" ]] && continue
-    [[ "$sink" == sendspin_* ]] && continue
-
-    friendly_name="$sink"
-    service_dir="${BASE_DIR}/airplay2-${friendly_name}"
-    player_log="/config/shairport-sync/logs/${friendly_name}-ap2.log"
-    config_file="${CONFIG_DIR}/${friendly_name}-ap2.conf"
-
-    if [ -d "$service_dir" ]; then
-        PORT_BASE=$((PORT_BASE + 1))
-        continue
-    fi
-
-    mkdir -p "${service_dir}" "${service_dir}/dependencies.d"
-    echo "longrun" > "${service_dir}/type"
-    touch "${service_dir}/dependencies.d/airplay2-dbus"
-    touch "${service_dir}/dependencies.d/airplay2-avahi"
-    touch "${service_dir}/dependencies.d/airplay2-nqptp"
-
-    # Reuse this zone's previously-assigned port if it's still free AND
-    # not claimed by some OTHER zone's own persisted entry. Only fall
-    # forward to a new port (and re-persist it) otherwise — keeping the
-    # port, and therefore the derived AirPlay 2 device ID, stable
-    # across restarts instead of drifting with pactl's scan order.
-    mapped_port="$(get_mapped_port "$friendly_name")"
-    if [[ -n "$mapped_port" ]] && is_port_available "$mapped_port" \
-        && ! port_claimed_by_other "$mapped_port" "$friendly_name"; then
-        current_port="$mapped_port"
-        echo "Reusing persisted port ${current_port} for ${friendly_name}" >> "$log_file"
-    else
-        if [[ -n "$mapped_port" ]]; then
-            if port_claimed_by_other "$mapped_port" "$friendly_name"; then
-                echo "Persisted port ${mapped_port} for ${friendly_name} is also claimed by another zone in port_map.txt, reassigning" >> "$log_file"
-            else
-                echo "Persisted port ${mapped_port} for ${friendly_name} is no longer free, reassigning" >> "$log_file"
-            fi
-        fi
-        while ! is_port_available "$PORT_BASE" || port_claimed_by_other "$PORT_BASE" "$friendly_name"; do
-            PORT_BASE=$((PORT_BASE + 1))
-        done
-        current_port=$PORT_BASE
-        set_mapped_port "$friendly_name" "$current_port"
-        echo "Assigned new port ${current_port} for ${friendly_name}" >> "$log_file"
-        PORT_BASE=$((PORT_BASE + 1))
-    fi
-
-    UDP_PORT_BASE=$((UDP_PORT_BASE + 10))
-    current_sink=$sink
-    current_name="${friendly_name//_/ }"
-    current_log=$player_log
-    current_udp_base=$UDP_PORT_BASE
-
-    # Per-zone user overrides, spliced into the general block below via
-    # libconfig's @include. Lives in persistent /config storage and is
-    # never overwritten once it exists, so settings such as
-    # audio_backend_latency_offset_in_seconds survive restarts. The file
-    # must always exist: a missing @include target stops shairport-sync
-    # from parsing its config.
-    custom_file="${CONFIG_DIR}/${friendly_name}-ap2.custom"
-    if [ ! -f "${custom_file}" ]; then
-        cat > "${custom_file}" <<'EOF'
-// Per-zone shairport-sync overrides, included inside general = { ... }
-// Example:
-// audio_backend_latency_offset_in_seconds = -0.15;
-EOF
-        echo "Created ${custom_file}" >> "$log_file"
-    fi
-
-    cat > "${config_file}" <<EOF
-general :
-{
-  name = "${current_name}";
-  port = ${current_port};
-  interface = "${AIRPLAY_INTERFACE}";
-  output_backend = "pulseaudio";
-  udp_port_base = ${current_udp_base};
-  mdns_backend = "avahi";
-  @include "${custom_file}"
-};
-sessioncontrol :
-{
-  allow_session_interruption = "yes";
-};
-diagnostics :
-{
-  log_show_time_since_startup = "yes";
-  log_show_time_since_last_message = "no";
-};
-pulseaudio :
-{
-  sink = "${current_sink}";
-  application_name = "Shairport Sync";
-};
-EOF
-
-    cat > "${service_dir}/run" <<EOF
+# One manager for every PulseAudio-sink zone (see the comment above).
+SINK_ZONE_MANAGER_SERVICE="${BASE_DIR}/airplay2-sink-zone-manager"
+if [ ! -d "$SINK_ZONE_MANAGER_SERVICE" ]; then
+    mkdir -p "$SINK_ZONE_MANAGER_SERVICE" "${SINK_ZONE_MANAGER_SERVICE}/dependencies.d"
+    echo "longrun" > "${SINK_ZONE_MANAGER_SERVICE}/type"
+    touch "${SINK_ZONE_MANAGER_SERVICE}/dependencies.d/airplay2-dbus"
+    touch "${SINK_ZONE_MANAGER_SERVICE}/dependencies.d/airplay2-avahi"
+    touch "${SINK_ZONE_MANAGER_SERVICE}/dependencies.d/airplay2-nqptp"
+    # Unquoted heredoc on purpose: AIRPLAY_INTERFACE is baked in here, the
+    # same way it was baked into each zone's generated config before.
+    cat > "${SINK_ZONE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
-truncate -s 0 "${current_log}"
-echo "\$(date) - Starting AirPlay 2 receiver: ${current_name} for ${current_sink} on port ${current_port}" >> "${current_log}"
-exec shairport-sync \
-    -a "${current_name}" \
-    -p ${current_port} \
-    -c "${config_file}" \
-    -vv \
-    >> "${current_log}" 2>&1
+${AIRPLAY_INTERFACE_EXPORT}
+mkdir -p /config/shairport-sync/logs
+exec ${NETNS_EXEC}python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sync/logs/sink_zone_manager.log 2>&1
 EOF
-    chmod +x "${service_dir}/run"
-    touch "${CONTENTS_DIR}/airplay2-${friendly_name}"
-done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
+    chmod +x "${SINK_ZONE_MANAGER_SERVICE}/run"
+    touch "${CONTENTS_DIR}/airplay2-sink-zone-manager"
+fi
