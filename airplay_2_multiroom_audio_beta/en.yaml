@@ -5,3 +5,11 @@ configuration:
       Verbosity of the per-zone shairport-sync logs. v is the least detailed,
       vv (the default) adds more, and vvv is the most detailed and grows the
       logs fastest. Restart the add-on after changing it.
+  remap_sinks:
+    name: Remap sinks
+    description: >-
+      Stereo sinks to carve out of a sound card, one per zone. channels picks
+      which pair of the master's outputs the zone plays on (stereo = a plain
+      2-channel card or USB DAC). For now these are only written to custom.pa
+      in this add-on's config folder, for copying into the audio plugin's
+      /data/custom.pa; they are not loaded yet.
