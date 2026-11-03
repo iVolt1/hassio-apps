@@ -6,6 +6,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `remap_sinks` option. On every start the add-on writes these as `load-module
+  module-remap-sink` lines to `custom.pa` in its config folder
+  (`/addon_configs/<slug>/custom.pa`), inside a marked block; text outside the block is
+  kept. Remap sinks that are loaded but not in the options are listed there as comments.
+  Nothing is loaded into PulseAudio yet; copy the block into the audio plugin's
+  `/data/custom.pa` to make the sinks permanent.
 - A zone's name can be set in its `<zone>-ap2.custom` file with `name = "...";`. It
   replaces the generated name instead of duplicating it, which shairport-sync rejects
   as a fatal "duplicate setting name". The name also changes the zone's AirPlay 2

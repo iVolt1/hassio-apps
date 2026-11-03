@@ -319,6 +319,14 @@ while read -r remap_sink; do
     pactl load-module module-remap-sink $remap_args >> "$log_file" 2>&1
 done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
 
+# --- custom.pa from the remap_sinks option (generate only) --------------
+# Writes the remap_sinks option as load-module lines to /config/custom.pa
+# (/addon_configs/<slug>/custom.pa on the host), for copying into the audio
+# plugin's /data/custom.pa. Loads nothing into PulseAudio. Runs after the
+# recreate loop above so its "unmanaged sinks" list sees the final state.
+python3 -I /usr/sbin/remap_sinks.py >> "$log_file" 2>&1 \
+    || echo "remap_sinks.py exited $? (custom.pa not updated)" >> "$log_file"
+
 # --- Sink-backed zones are no longer generated here ---------------------
 # This script used to create one s6 service directory per remap sink. s6-rc
 # compiles its service database once, at container start, so a sink that
