@@ -1,5 +1,5 @@
 name: Airplay2 Multiroom Audio Beta
-version: 0.115
+version: 0.116
 slug: airplay_2_multiroom_audio_beta
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
@@ -27,7 +27,7 @@ options:
   remap_sinks: []
 schema:
   log_level: list(v|vv|vvv)
-  # Loaded at start if missing, and written to /addon_configs/<slug>/custom.pa. master is a
+  # Applied at every start (loaded / reloaded / unloaded). master is a
   # PulseAudio sink name, e.g. alsa_output.pci-0000_03_00.0.analog-surround-71
   remap_sinks:
     - name: str
