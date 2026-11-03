@@ -9,7 +9,9 @@ That file uses the same syntax as the audio plugin's own /data/custom.pa,
 which hassio_audio includes at startup. Copy the managed block there and
 the sinks exist at boot even without this add-on.
 
-It never unloads or changes a sink that is already loaded. It:
+It only ever unloads or reloads sinks it manages: ones in the options, and
+ones it loaded itself earlier (recorded in remap_sinks_state.json next to
+custom.pa). Sinks made by anything else are left alone. It:
   * rewrites only the block between the BEGIN/END markers, leaving any
     other text in custom.pa alone
   * lists remap sinks that are loaded right now but are not in the
@@ -18,8 +20,10 @@ It never unloads or changes a sink that is already loaded. It:
   * logs a diff of what changed
   * skips (and comments out) a configured sink whose master channels are
     already used by another sink on the same master, configured or not
-  * with --load, loads each configured sink that isn't loaded yet, using
-    the same line that goes into custom.pa
+  * with --load, makes PulseAudio match the options, using the same lines
+    that go into custom.pa: loads configured sinks that are missing, reloads
+    ones whose entry changed, and unloads ones it loaded earlier whose entry
+    was removed
 
 Usage: remap_sinks.py [--load] [--dry-run]
 """
@@ -34,6 +38,11 @@ from pathlib import Path
 
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CUSTOM_PA = Path(os.environ.get("RS_CUSTOM_PA", "/config/custom.pa"))
+STATE_FILE = Path(os.environ.get("RS_STATE_FILE",
+                                 str(CUSTOM_PA.with_name("remap_sinks_state.json"))))
+
+# sink_name -> module index, filled by loaded_remap_modules()
+MODULE_IDX = {}
 
 BEGIN = "# >>> airplay2_multiroom_audio managed >>>"
 END = "# <<< airplay2_multiroom_audio managed <<<"
@@ -111,14 +120,17 @@ def loaded_remap_modules():
     if res.returncode != 0:
         log(f"pactl list modules exited {res.returncode}; not listing unmanaged sinks")
         return None
-    out, is_remap = [], False
+    out, is_remap, idx = [], False, None
+    MODULE_IDX.clear()
     for line in res.stdout.splitlines():
         if line.startswith("Module #"):
-            is_remap = False
+            is_remap, idx = False, line[len("Module #"):].strip()
         elif re.match(r"\s*Name:\s*module-remap-sink\s*$", line):
             is_remap = True
         elif is_remap and re.match(r"\s*Argument:", line):
-            out.append(line.split(":", 1)[1].strip())
+            args = line.split(":", 1)[1].strip()
+            out.append(args)
+            MODULE_IDX[sink_name_of(args)] = idx
             is_remap = False
     return out
 
@@ -206,36 +218,94 @@ def build_block(entries: list, old: str = ""):
         log(f"{len(unmanaged)} unmanaged remap sink(s) loaded: "
             + ", ".join(sink_name_of(a) or "?" for a in unmanaged))
     lines.append(END)
-    return lines, loadable, loaded
+    return lines, loadable, loaded, names
 
 
-def load_missing(loadable: list, loaded) -> None:
-    """Loads each usable configured sink that isn't loaded yet."""
+def pactl(*args) -> tuple:
+    """(ok, output) for one pactl call."""
+    try:
+        # One argv element per call argument: pactl joins its arguments with
+        # spaces anyway, and this keeps the quoting in sink_properties intact.
+        res = subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    if res.returncode == 0:
+        return True, res.stdout.strip()
+    return False, res.stderr.strip() or f"exit {res.returncode}"
+
+
+def load(name: str, args: str) -> bool:
+    ok, out = pactl("load-module", "module-remap-sink", args)
+    log(f"loaded {name} (module #{out})" if ok else f"loading {name} failed: {out}")
+    return ok
+
+
+def unload(name: str) -> bool:
+    idx = MODULE_IDX.get(name)
+    ok, out = pactl("unload-module", idx) if idx else (False, "module not found")
+    if not ok:
+        log(f"unloading {name} failed: {out}")
+    return ok
+
+
+def same(a: str, b: str) -> bool:
+    return a.split() == b.split()
+
+
+def load_state() -> dict:
+    try:
+        st = json.loads(STATE_FILE.read_text())
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(st, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, STATE_FILE)
+
+
+def apply(loadable: list, loaded, configured: set) -> None:
+    """Makes PulseAudio match the options. Runs before the zone manager
+    starts, so zones only ever see the final set of sinks."""
     if loaded is None:
-        log("pactl not available; not loading any sinks")
+        log("pactl not available; not loading or unloading any sinks")
         return
     current = {sink_name_of(a): a for a in loaded}
+    state = load_state()
+
     for name, args in loadable:
-        if name in current:
-            if current[name].split() != args.split():
-                log(f"{name} is already loaded with different arguments; leaving it. "
-                    f"To apply the option: pactl unload-module <module of {name}>, "
-                    "then restart the add-on.")
-            else:
-                log(f"{name} already loaded")
-            continue
-        try:
-            # One argv element: pactl joins its arguments with spaces anyway,
-            # and this keeps the quoting in sink_properties intact.
-            res = subprocess.run(["pactl", "load-module", "module-remap-sink", args],
-                                 capture_output=True, text=True, timeout=15)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log(f"loading {name} failed: {e}")
-            continue
-        if res.returncode == 0:
-            log(f"loaded {name} (module #{res.stdout.strip()})")
+        if name not in current:
+            if load(name, args):
+                state[name] = args
+        elif same(current[name], args):
+            log(f"{name} already loaded")
+            state[name] = args
         else:
-            log(f"loading {name} failed: {res.stderr.strip() or 'exit ' + str(res.returncode)}")
+            log(f"{name} differs from its option; reloading")
+            if unload(name):
+                if load(name, args):
+                    state[name] = args
+                else:
+                    log(f"restoring the previous {name}")
+                    load(name, current[name])
+
+    # Entries removed from the options. Usable-but-skipped entries are still
+    # configured, so they keep their state and their sink.
+    for name in [n for n in state if n not in configured]:
+        if name not in current:
+            log(f"{name} was removed from the options and is not loaded")
+        elif same(current[name], state[name]):
+            if unload(name):
+                log(f"unloaded {name} (removed from the options)")
+        else:
+            log(f"{name} was removed from the options but is loaded with arguments "
+                "this add-on did not set; leaving it")
+        del state[name]
+
+    save_state(state)
 
 
 def splice(old: str, block: list) -> str:
@@ -254,11 +324,11 @@ def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
     old = CUSTOM_PA.read_text() if CUSTOM_PA.exists() else ""
-    block, loadable, loaded = build_block(load_options(), old)
+    block, loadable, loaded, configured = build_block(load_options(), old)
     new = splice(old, block)
 
     if load and not dry_run:
-        load_missing(loadable, loaded)
+        apply(loadable, loaded, configured)
 
     if new == old:
         log(f"{CUSTOM_PA} unchanged")

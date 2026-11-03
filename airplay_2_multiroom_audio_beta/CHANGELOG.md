@@ -6,6 +6,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `remap_sinks` now fully applies at every start: a sink whose entry changed is unloaded
+  and reloaded with the new settings (the previous one is restored if the new one fails
+  to load), and a sink this add-on loaded whose entry was removed is unloaded. The add-on
+  records the sinks it manages in `remap_sinks_state.json` next to `custom.pa`, and never
+  unloads or changes a sink it didn't create. This happens before zones start, so each
+  zone keeps its port and Music Assistant player.
 - `remap_sinks` entries that are not loaded yet are now loaded at add-on start, before
   zones are created, so each gets its AirPlay 2 zone straight away. An entry whose master
   channels are already used by another sink on the same card (configured or not) is not
