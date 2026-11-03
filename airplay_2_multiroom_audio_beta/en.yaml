@@ -10,6 +10,8 @@ configuration:
     description: >-
       Stereo sinks to carve out of a sound card, one per zone. channels picks
       which pair of the master's outputs the zone plays on (stereo = a plain
-      2-channel card or USB DAC). For now these are only written to custom.pa
-      in this add-on's config folder, for copying into the audio plugin's
-      /data/custom.pa; they are not loaded yet.
+      2-channel card or USB DAC). Missing sinks are loaded when the add-on
+      starts; a sink whose channels another sink already uses is skipped (see
+      the log). They are also written to custom.pa in this add-on's config
+      folder, for copying into the audio plugin's /data/custom.pa so they
+      exist without the add-on. Sinks that are already loaded are not changed.

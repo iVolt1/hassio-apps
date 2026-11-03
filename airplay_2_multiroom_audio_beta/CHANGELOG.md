@@ -6,6 +6,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `remap_sinks` entries that are not loaded yet are now loaded at add-on start, before
+  zones are created, so each gets its AirPlay 2 zone straight away. An entry whose master
+  channels are already used by another sink on the same card (configured or not) is not
+  loaded, is commented out in `custom.pa` with the reason, and is logged. Sinks that are
+  already loaded are never unloaded or changed.
 - `remap_sinks` option. On every start the add-on writes these as `load-module
   module-remap-sink` lines to `custom.pa` in its config folder
   (`/addon_configs/<slug>/custom.pa`), inside a marked block; text outside the block is
