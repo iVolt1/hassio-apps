@@ -18,6 +18,10 @@ set; that restarts only that zone.
                     pair, named with its system name, then the same as apply
   POST /api/adopt   {"name": ...}: adds an unmanaged sink to the options
                     under its current name, then the same as apply
+  POST /api/profile {"card", "profile"}: sets a card's profile now, saves it
+                    in card_profiles, re-points that card's remap_sinks
+                    entries to its new sink where their pair still exists,
+                    then the same as apply
   POST /api/zone    {"key", "name", "offset_ms", "volume_max_db"}: writes
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
@@ -38,6 +42,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -390,10 +395,11 @@ def save_options(options: dict) -> None:
     os.replace(tmp, OPTIONS_FILE)
 
 
-def change_and_apply(change) -> list:
+def change_and_apply(change, edit_options=None) -> list:
     """Reads the options, lets change(entries, descs) edit the remap_sinks
-    list in place and return what it did, then saves and applies. Returns the
-    log lines to show."""
+    list in place and return what it did (and edit_options(options), if
+    given, edit the rest), then saves and applies. Returns the log lines to
+    show."""
     try:
         options = json.loads(OPTIONS_FILE.read_text())
     except (OSError, ValueError) as e:
@@ -402,6 +408,8 @@ def change_and_apply(change) -> list:
     descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
 
     lines = change(entries, descs)
+    if edit_options:
+        lines = edit_options(options) + lines
     if not lines:
         return ["nothing changed"]
 
@@ -446,6 +454,79 @@ def _rename(entries: list, descs: dict, names: dict) -> list:
             entry["name"] = new
             lines.append(f"rename {old} -> {new}")
     return lines
+
+
+def card_sink_prefix(card: str) -> str:
+    for card_prefix, sink_prefix in (("alsa_card.", "alsa_output."), ("bluez_card.", "bluez_sink.")):
+        if card.startswith(card_prefix):
+            return sink_prefix + card[len(card_prefix):] + "."
+    return "\0"   # matches no sink
+
+
+def set_profile(card: str, profile: str) -> list:
+    """Sets a card's profile now, keeps it in card_profiles, and re-points
+    the card's remap_sinks entries to its new output sink where their pair
+    still exists. Entries whose pair is gone stay in the options (pointing at
+    the old sink), so switching back brings them back."""
+    pc = next((c for c in list_cards() if c["name"] == card), None)
+    if not pc:
+        raise ApplyError(f"no card {card}; reload the page")
+    prof = next((p for p in pc["profiles"] if p["name"] == profile), None)
+    if not prof:
+        raise ApplyError(f"{card} has no profile {profile}")
+    old_profile = pc["active"]
+    lines = []
+    if old_profile != profile:
+        res = subprocess.run(["pactl", "set-card-profile", card, profile],
+                             capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            raise ApplyError(f"setting the profile failed: {res.stderr.strip() or res.returncode}")
+        lines.append(f"set {pc['description'] or card} to {prof['description']} (was {old_profile})")
+    else:
+        lines.append(f"{pc['description'] or card} is already {prof['description']}; saving it")
+
+    # The new output sink(s) appear right after the switch; wait briefly.
+    prefix = card_sink_prefix(card)
+    outputs = []
+    for _ in range(20):
+        outputs = [s for s in list_sinks() if s.get("name", "").startswith(prefix)
+                   and "remap" not in s.get("driver", "")]
+        if outputs or prof["sinks"] == 0:
+            break
+        time.sleep(0.15)
+    chans = {s["name"]: {c.strip() for c in s.get("channel_map", "").split(",") if c.strip()}
+             for s in outputs}
+
+    def edit_options(options):
+        cps = [e for e in (options.get("card_profiles") or [])
+               if isinstance(e, dict) and e.get("card") != card]
+        cps.append({"card": card, "profile": profile})
+        options["card_profiles"] = cps
+        return []
+
+    def change(entries, descs):
+        out = []
+        for e in entries:
+            master = str(e.get("master", ""))
+            if not master.startswith(prefix):
+                continue
+            pair = str(e.get("channels", ""))
+            needs = PAIR_NEEDS.get(pair, {"front-left", "front-right"})
+            name = e.get("name") or rs.system_name(master, pair, descs) or "?"
+            fit = next((n for n, c in chans.items() if needs <= c), None)
+            if fit and fit != master:
+                e["master"] = fit
+                out.append(f"{name}: moved to {fit}")
+            elif fit:
+                out.append(f"{name}: unchanged")
+            else:
+                out.append(f"{name}: stops — the new profile has no {PAIR_LABEL.get(pair, pair)}"
+                           " (kept in the options; switching back restores it)")
+        return out or ["no remap sinks on this card"]
+    try:
+        return lines + change_and_apply(change, edit_options)
+    except ApplyError as e:
+        raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
 
 
 def create_sink(master: str, pair: str) -> list:
@@ -599,8 +680,8 @@ input.nm.changed{border-color:#4a6a96}
 .btn{min-height:44px;padding:0 18px;border-radius:8px;font:600 14px system-ui,sans-serif;cursor:pointer}
 .btn.pri{border:0;background:#3d8bfd;color:#0b1220}.btn.sec{border:1px solid #353b46;background:transparent;color:#e6e8eb;font-weight:500}
 .btn:disabled{opacity:.5;cursor:default}
-pre#result,pre#zresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
-pre#result.err,pre#zresult.err{color:#f0b26a}
+pre#result,pre#zresult,pre#cresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
+pre#result.err,pre#zresult.err,pre#cresult.err{color:#f0b26a}
 .btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
 form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
 form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
@@ -643,6 +724,22 @@ async function post(url, body, outId = 'result', delay = 3000) {
 if (applyBtn) applyBtn.addEventListener('click', () => {
   const names = {}; changed().forEach(i => names[i.dataset.index] = i.value.trim());
   post('api/apply', {names});
+});
+document.querySelectorAll('select.cprof').forEach(sel => {
+  const card = sel.closest('.card'), setBtn = card.querySelector('button.cset'), box = card.querySelector('.cconfirm');
+  const sync = () => { setBtn.disabled = sel.value === sel.dataset.active; if (setBtn.disabled) box.hidden = true; };
+  sel.addEventListener('change', sync);
+  setBtn.addEventListener('click', () => {
+    const aff = JSON.parse(sel.dataset.affected), prof = sel.selectedOptions[0].textContent;
+    box.querySelector('.ctext').textContent = aff.length
+      ? `Switching to ${prof} restarts this card's zones: ${aff.join(', ')}. Zones whose channel pair the new profile lacks stop until you switch back.`
+      : `Switch to ${prof}? No remap sinks use this card.`;
+    box.hidden = false;
+  });
+  box.querySelector('button.cno').addEventListener('click', () => { sel.value = sel.dataset.active; sync(); });
+  box.querySelector('button.cgo').addEventListener('click', () =>
+    post('api/profile', {card: sel.dataset.card, profile: sel.value}, 'cresult', 6000));
+  sync();
 });
 document.querySelectorAll('button.zedit-btn').forEach(b => b.addEventListener('click', () => {
   const row = document.getElementById(b.dataset.target); row.hidden = !row.hidden;
@@ -691,6 +788,11 @@ document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click'
 def render(st: dict) -> str:
     e = html.escape
     by_sink = {c["name"]: c for c in st["cards"]}
+    affected = {}
+    for pc in st["pa_cards"]:
+        pre = card_sink_prefix(pc["name"])
+        affected[pc["name"]] = [r["name"] + ("" if r["managed"] else " (unmanaged: will be lost)")
+                                for r in st["remap_sinks"] if r["master"].startswith(pre)]
     shown = set()
     card_html = []
     for i, pc in enumerate(st["pa_cards"]):
@@ -709,8 +811,16 @@ def render(st: dict) -> str:
             f'<div class="card"><div style="font-weight:600">{e(pc["description"] or pc["name"])}</div>'
             f'<div class="mono">{e(pc["name"])}</div>'
             f'<label for="cp_{i}" class="sub" style="font-size:12px;margin-top:4px">Profile</label>'
-            f'<select id="cp_{i}" disabled style="min-height:40px;padding:0 10px;border-radius:8px;'
+            f'<div style="display:flex;gap:8px"><select id="cp_{i}" class="cprof" data-card="{e(pc["name"])}" '
+            f'data-active="{e(pc["active"])}" data-affected="{e(json.dumps(affected.get(pc["name"], [])))}" '
+            f'style="flex:1;min-width:0;min-height:40px;padding:0 10px;border-radius:8px;'
             f'border:1px solid #353b46;background:#111318;color:#e6e8eb">{opts}</select>'
+            f'<button class="btn sec sm cset" type="button" data-for="cp_{i}" disabled style="margin:0">Set</button></div>'
+            f'<div class="cconfirm" id="cc_{i}" hidden style="border:1px solid #5a4a2a;border-radius:8px;padding:10px;'
+            f'background:#221d14;font-size:13px"><div class="ctext"></div>'
+            f'<div style="display:flex;gap:8px;margin-top:8px"><button class="btn pri sm cgo" type="button" '
+            f'data-for="cp_{i}" style="margin:0">Switch profile</button><button class="btn sec sm cno" '
+            f'type="button" style="margin:0">Cancel</button></div></div>'
             + ("".join(outs) or '<div class="sub">No output with this profile</div>') + '</div>')
     # Sound-card sinks no PulseAudio card claims (unusual) still get shown.
     for c in st["cards"]:
@@ -817,8 +927,8 @@ def render(st: dict) -> str:
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
 <section><h1>Zones</h1><p class="sub">Every running AirPlay 2 receiver.</p>{zones_html}</section>
-<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Profiles are shown read-only for now.</p>
-<div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div></section>
+<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile restarts that card's zones.</p>
+<div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
 <section><h2>Remap sinks</h2><p class="sub">Rename a managed sink and Apply. The system name stays as a reference.</p>
 <div class="box"><table><thead><tr><th>Sink name</th><th>System name</th><th>Card</th>
 <th>Channels</th><th>State</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
@@ -870,7 +980,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, "Forbidden\n", "text/plain")
             return
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone"):
+        if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -886,6 +996,8 @@ class Handler(BaseHTTPRequestHandler):
                 lines = apply_names(names)
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")))
+            elif path == "/api/profile":
+                lines = set_profile(str(body.get("card", "")), str(body.get("profile", "")))
             elif path == "/api/zone":
                 lines = save_zone(str(body.get("key", "")), str(body.get("name", "")),
                                   str(body.get("offset_ms", "")), str(body.get("volume_max_db", "")))

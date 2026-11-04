@@ -5,6 +5,13 @@ configuration:
       Verbosity of the per-zone shairport-sync logs. v is the least detailed,
       vv (the default) adds more, and vvv is the most detailed and grows the
       logs fastest. Restart the add-on after changing it.
+  card_profiles:
+    name: Card profiles
+    description: >-
+      Profile to set on a sound card at every start, before the remap sinks
+      are loaded (e.g. output:analog-surround-71). Easiest to set from the web
+      panel's Sound cards section. Cards not listed keep the profile
+      PulseAudio gives them.
   remap_sinks:
     name: Remap sinks
     description: >-

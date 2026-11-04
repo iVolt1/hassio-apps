@@ -20,7 +20,9 @@ custom.pa). Sinks made by anything else are left alone. It:
   * logs a diff of what changed
   * skips (and comments out) a configured sink whose master channels are
     already used by another sink on the same master, configured or not
-  * with --load, makes PulseAudio match the options, using the same lines
+  * with --load, first sets each card in the card_profiles option to its
+    profile (a card's master sink only exists under the right profile), then
+    makes PulseAudio match the options, using the same lines
     that go into custom.pa: loads configured sinks that are missing, reloads
     ones whose entry changed, and unloads ones it loaded earlier whose entry
     was removed
@@ -111,6 +113,73 @@ def load_options() -> list:
         return []
     sinks = opts.get("remap_sinks") or []
     return sinks if isinstance(sinks, list) else []
+
+
+def load_card_profiles() -> list:
+    try:
+        opts = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    cp = opts.get("card_profiles") or []
+    return cp if isinstance(cp, list) else []
+
+
+def card_profiles_now():
+    """{card name: (active profile, set of profile names)} from
+    `pactl list cards`, or None if pactl can't be queried."""
+    try:
+        res = subprocess.run(["pactl", "list", "cards"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    out, name, section = {}, None, None
+    for line in res.stdout.splitlines():
+        s = line.strip()
+        if line.startswith("Card #"):
+            name, section = None, None
+        elif line.startswith("\t") and not line.startswith("\t\t"):
+            section = None
+            if s.startswith("Name:"):
+                name = s[5:].strip()
+                out[name] = ["", set()]
+            elif s.startswith("Active Profile:") and name:
+                out[name][0] = s[15:].strip()
+            elif s == "Profiles:":
+                section = "Profiles"
+        elif section == "Profiles" and name and line.startswith("\t\t") \
+                and not line.startswith("\t\t\t") and ": " in s:
+            out[name][1].add(s.split(": ", 1)[0])
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
+def apply_card_profiles() -> None:
+    """Sets each card in the card_profiles option to its profile, if it
+    isn't already. Cards not listed are left as they are."""
+    wanted = [e for e in load_card_profiles() if isinstance(e, dict)]
+    if not wanted:
+        return
+    now = card_profiles_now()
+    if now is None:
+        log("pactl not available; not setting card profiles")
+        return
+    for e in wanted:
+        card, profile = str(e.get("card", "")).strip(), str(e.get("profile", "")).strip()
+        if card not in now:
+            log(f"card profile: no card {card} (unplugged or renamed?); skipping")
+        elif profile not in now[card][1]:
+            log(f"card profile: {card} has no profile {profile}; skipping")
+        elif now[card][0] == profile:
+            log(f"card profile: {card} already {profile}")
+        else:
+            res = subprocess.run(["pactl", "set-card-profile", card, profile],
+                                 capture_output=True, text=True, timeout=15)
+            if res.returncode == 0:
+                log(f"card profile: set {card} to {profile} (was {now[card][0]})")
+            else:
+                log(f"card profile: setting {card} to {profile} failed: "
+                    f"{res.stderr.strip() or res.returncode}")
 
 
 def module_line(entry: dict, descs: dict = None):
@@ -246,6 +315,14 @@ def build_block(entries: list, old: str = ""):
     loadable = []
     for name, args in configured:
         master, chans = claim(args)
+        if descs and master not in descs:
+            # E.g. its card is set to a profile without this sink. Kept in the
+            # options; it loads again once the master exists.
+            log(f"NOT loading {name}: its master {master} doesn't exist now "
+                "(card profile changed or card unplugged?)")
+            lines.append(f"# NOT LOADED, master doesn't exist now: "
+                         f"load-module module-remap-sink {args}")
+            continue
         clash = next((o for o, m, c in taken if m == master and c & chans), None)
         if clash:
             log(f"NOT using {name}: channels {','.join(sorted(chans))} of {master} "
@@ -384,6 +461,8 @@ def main() -> int:
     fcntl.flock(lock, fcntl.LOCK_EX)
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
+    if load and not dry_run:
+        apply_card_profiles()
     old = CUSTOM_PA.read_text() if CUSTOM_PA.exists() else ""
     block, loadable, loaded, configured = build_block(load_options(), old)
     new = splice(old, block)
