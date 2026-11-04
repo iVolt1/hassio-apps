@@ -6,6 +6,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: the Sound cards section now lists PulseAudio's cards (including ones set to
+  Off) with their active profile and the profiles they offer (unplugged ones marked), and
+  each card's output sink(s) with used and free channel pairs. Read-only for now.
+  `/api/state` includes it as `pa_cards`; `/api/debug/cards` returns the raw
+  `pactl list cards` output.
 - Web panel: sound-card and Bluetooth zones have an **Edit** form for AirPlay name, latency
   offset (ms) and max volume (dB). Saving writes them to a marked block in the zone's
   `<zone>-ap2.custom` file (an empty field leaves that setting out; your own lines outside
