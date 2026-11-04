@@ -149,13 +149,31 @@ def card_outputs(card_name: str, sink_names) -> list:
     return []
 
 
-def pair_of(args: str):
-    """The channels choice a remap sink's arguments correspond to, or None."""
-    _, chans = rs.claim(args)
-    for pair, needs in PAIR_NEEDS.items():
-        if chans == needs:
-            return pair
-    return None
+def channels_of(args: str):
+    """(channels choice, left, right) a remap sink's arguments correspond
+    to: a named pair (left/right empty), "custom" with its two master
+    channels in order, or (None, "", "")."""
+    mcm = (rs.arg_of(args, "master_channel_map") or rs.arg_of(args, "channel_map")
+           or "front-left,front-right").split(",")
+    for pair in ("front", "rear", "side", "center_lfe"):
+        if mcm == rs.PAIRS[pair].split(","):
+            return pair, "", ""
+    if len(mcm) == 2 and all(rs.CHANNEL_RE.match(c) for c in mcm):
+        return "custom", mcm[0], mcm[1]
+    return None, "", ""
+
+
+def needs_of(pair: str, left: str = "", right: str = "") -> set:
+    if pair == "custom":
+        return {left, right} - {""}
+    return PAIR_NEEDS.get(pair, {"front-left", "front-right"})
+
+
+def channels_label(pair: str, left: str = "", right: str = "") -> str:
+    if pair == "custom":
+        l, r = rs.channel_abbr(left).upper(), rs.channel_abbr(right).upper()
+        return f"{l} (mono)" if left == right else f"{l} + {r}"
+    return PAIR_LABEL.get(pair, pair)
 
 
 def running_zones() -> set:
@@ -293,23 +311,26 @@ def state() -> dict:
             continue
         master = str(entry.get("master", "")).strip()
         pair = str(entry.get("channels", "")).strip()
-        name = str(entry.get("name", "") or "").strip() or rs.system_name(master, pair, descs)
+        left, right = str(entry.get("left", "") or ""), str(entry.get("right", "") or "")
+        name = str(entry.get("name", "") or "").strip() or rs.entry_system_name(entry, descs)
         if name:
-            configured[name] = {"master": master, "pair": pair, "index": index}
+            configured[name] = {"master": master, "pair": pair, "left": left, "right": right,
+                                "index": index}
 
     remaps, used = [], {}
     for args in loaded:
         name = rs.sink_name_of(args)
         master = rs.arg_of(args, "master") or ""
-        pair = pair_of(args)
+        pair, left, right = channels_of(args)
         used.setdefault(master, set()).update(rs.claim(args)[1])
         remaps.append({
             "name": name,
-            "system_name": rs.system_name(master, pair, descs) if pair else None,
+            "system_name": rs.system_name(master, pair, descs, left, right) if pair else None,
             "master": master,
             "master_description": descs.get(master, ""),
-            "pair": pair,
-            "channels": PAIR_LABEL.get(pair, rs.arg_of(args, "master_channel_map") or "?"),
+            "pair": pair, "left": left, "right": right,
+            "channels": channels_label(pair, left, right) if pair else
+                        (rs.arg_of(args, "master_channel_map") or "?"),
             "managed": name in configured,
             "index": configured[name]["index"] if name in configured else None,
             "loaded": True,
@@ -319,13 +340,13 @@ def state() -> dict:
         if not any(r["name"] == name for r in remaps):
             remaps.append({
                 "name": name,
-                "system_name": rs.system_name(c["master"], c["pair"], descs),
+                "system_name": rs.system_name(c["master"], c["pair"], descs, c["left"], c["right"]),
                 "master": c["master"], "master_description": descs.get(c["master"], ""),
-                "pair": c["pair"], "channels": PAIR_LABEL.get(c["pair"], c["pair"]),
+                "pair": c["pair"], "left": c["left"], "right": c["right"],
+                "channels": channels_label(c["pair"], c["left"], c["right"]),
                 "managed": True, "index": c["index"], "loaded": False, "zone_running": False,
             })
-            if c["pair"] in PAIR_NEEDS:
-                used.setdefault(c["master"], set()).update(PAIR_NEEDS[c["pair"]])
+            used.setdefault(c["master"], set()).update(needs_of(c["pair"], c["left"], c["right"]))
 
     card_names = {s["name"] for s in sinks if "alsa" in s.get("driver", "") and "name" in s}
     for r in remaps:
@@ -355,6 +376,10 @@ def state() -> dict:
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
         cards[-1]["free_names"] = {p: rs.system_name(s["name"], p, descs) for p in cards[-1]["free"]}
+        order = [c.strip() for c in s.get("channel_map", "").split(",") if c.strip()]
+        cards[-1]["free_channels"] = [c for c in order if c not in taken and rs.CHANNEL_RE.match(c)]
+        sn = rs.system_name(s["name"], "front", descs)
+        cards[-1]["name_base"] = sn[:-len("_fl_fr")] if sn else ""
     pa_cards = list_cards()
     for c in pa_cards:
         c["outputs"] = card_outputs(c["name"], [s["name"] for s in cards])
@@ -413,8 +438,7 @@ def change_and_apply(change, edit_options=None) -> list:
     if not lines:
         return ["nothing changed"]
 
-    resolved = [e.get("name") or rs.system_name(e.get("master", ""), e.get("channels", ""), descs)
-                for e in entries]
+    resolved = [e.get("name") or rs.entry_system_name(e, descs) for e in entries]
     dupes = {n for n in resolved if n and resolved.count(n) > 1}
     if dupes:
         raise ApplyError(f"name used twice: {', '.join(sorted(dupes))}")
@@ -448,8 +472,7 @@ def _rename(entries: list, descs: dict, names: dict) -> list:
         new = str(new).strip()
         if not rs.NAME_RE.match(new):
             raise ApplyError(f"'{new}': letters, digits, _ . - only")
-        old = entry.get("name") or rs.system_name(entry.get("master", ""),
-                                                   entry.get("channels", ""), descs)
+        old = entry.get("name") or rs.entry_system_name(entry, descs)
         if new != old:
             entry["name"] = new
             lines.append(f"rename {old} -> {new}")
@@ -475,6 +498,9 @@ def set_profile(card: str, profile: str) -> list:
     if not prof:
         raise ApplyError(f"{card} has no profile {profile}")
     old_profile = pc["active"]
+    # Descriptions before the switch: an entry using its system name gets it
+    # from its master's description, and that sink is about to go away.
+    pre_descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
     lines = []
     if old_profile != profile:
         res = subprocess.run(["pactl", "set-card-profile", card, profile],
@@ -511,16 +537,21 @@ def set_profile(card: str, profile: str) -> list:
             if not master.startswith(prefix):
                 continue
             pair = str(e.get("channels", ""))
-            needs = PAIR_NEEDS.get(pair, {"front-left", "front-right"})
-            name = e.get("name") or rs.system_name(master, pair, descs) or "?"
+            l, r = str(e.get("left", "") or ""), str(e.get("right", "") or "")
+            needs = needs_of(pair, l, r)
+            name = e.get("name") or rs.entry_system_name(e, pre_descs) or "?"
             fit = next((n for n, c in chans.items() if needs <= c), None)
             if fit and fit != master:
                 e["master"] = fit
+                if not e.get("name") and name != "?":
+                    # Keep the zone's name (and MA player): the new master's
+                    # description would give it a different system name.
+                    e["name"] = name
                 out.append(f"{name}: moved to {fit}")
             elif fit:
                 out.append(f"{name}: unchanged")
             else:
-                out.append(f"{name}: stops — the new profile has no {PAIR_LABEL.get(pair, pair)}"
+                out.append(f"{name}: stops — the new profile has no {channels_label(pair, l, r)}"
                            " (kept in the options; switching back restores it)")
         return out or ["no remap sinks on this card"]
     try:
@@ -529,20 +560,31 @@ def set_profile(card: str, profile: str) -> list:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
 
 
-def create_sink(master: str, pair: str) -> list:
-    """Adds a sink on a free pair of a card, named with its system name."""
+def create_sink(master: str, pair: str, left: str = "", right: str = "") -> list:
+    """Adds a sink on a free pair (or, for custom, two free channels) of a
+    card, named with its system name."""
     card = next((c for c in state()["cards"] if c["name"] == master), None)
     if not card:
         raise ApplyError(f"no sound card {master}; reload the page")
-    if pair not in card["free"]:
-        raise ApplyError(f"{PAIR_LABEL.get(pair, pair)} of {card['description']} is not free")
-    name = card["free_names"].get(pair)
+    if pair == "custom":
+        for ch in (left, right):
+            if ch not in card["free_channels"]:
+                raise ApplyError(f"channel {ch or '(none)'} of {card['description']} is not free")
+        descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
+        name = rs.system_name(master, "custom", descs, left, right)
+    else:
+        if pair not in card["free"]:
+            raise ApplyError(f"{PAIR_LABEL.get(pair, pair)} of {card['description']} is not free")
+        name = card["free_names"].get(pair)
     if not name:
         raise ApplyError("cannot make a system name for this card; add it in the Configuration tab")
 
     def change(entries, descs):
-        entries.append({"name": name, "master": master, "channels": pair})
-        return [f"create {name} ({card['description']}, {PAIR_LABEL[pair]})"]
+        entry = {"name": name, "master": master, "channels": pair}
+        if pair == "custom":
+            entry.update(left=left, right=right)
+        entries.append(entry)
+        return [f"create {name} ({card['description']}, {channels_label(pair, left, right)})"]
     return change_and_apply(change)
 
 
@@ -559,6 +601,8 @@ def adopt_sink(name: str) -> list:
 
     def change(entries, descs):
         entry = {"name": name, "master": row["master"], "channels": row["pair"]}
+        if row["pair"] == "custom":
+            entry.update(left=row["left"], right=row["right"])
         if m and m.group(1):
             entry["description"] = m.group(1)
         entries.append(entry)
@@ -767,13 +811,30 @@ function cardChanged() {
   if ([...pairSel.options].some(o => o.value === keep)) pairSel.value = keep;
   pairChanged();
 }
+const custom = document.getElementById('cc_custom'),
+      leftSel = document.getElementById('cc_left'), rightSel = document.getElementById('cc_right');
+const abbr = c => (custom ? JSON.parse(custom.dataset.abbr)[c] : '') || c.replace(/[^a-z0-9]/g, '');
 function pairChanged() {
   const o = pairSel.selectedOptions[0];
+  const isCustom = !!o && o.value === 'custom';
+  custom.hidden = !isCustom; custom.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    const card = cardSel.selectedOptions[0], chans = JSON.parse(card.dataset.chans);
+    [leftSel, rightSel].forEach((s, i) => { const keep = s.value; s.innerHTML = '';
+      chans.forEach(c => s.add(new Option(`${c} (${abbr(c).toUpperCase()})`, c)));
+      s.value = chans.includes(keep) ? keep : chans[Math.min(i, chans.length - 1)]; });
+    const base = card.dataset.base;
+    preview.textContent = base ? `${base}_${abbr(leftSel.value)}_${abbr(rightSel.value)}` : '(no system name)';
+    createBtn.disabled = !base;
+    return;
+  }
   preview.textContent = o ? (o.dataset.name || '(no system name)') : '';
   createBtn.disabled = !o || !o.dataset.name;
 }
+if (leftSel) { leftSel.addEventListener('change', pairChanged); rightSel.addEventListener('change', pairChanged); }
 if (cardSel) { cardSel.addEventListener('change', cardChanged); pairSel.addEventListener('change', pairChanged);
-  createBtn.addEventListener('click', () => post('api/create', {master: cardSel.value, channels: pairSel.value}));
+  createBtn.addEventListener('click', () => post('api/create', {master: cardSel.value, channels: pairSel.value,
+    left: pairSel.value === 'custom' ? leftSel.value : '', right: pairSel.value === 'custom' ? rightSel.value : ''}));
   cardChanged(); }
 refresh();
 document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click', () => {
@@ -804,9 +865,11 @@ def render(st: dict) -> str:
         for sink in pc["outputs"]:
             shown.add(sink)
             o = by_sink[sink]
+            fc = ", ".join(rs.channel_abbr(c).upper() for c in o["free_channels"])
             outs.append(f'<div class="mono" style="margin-top:4px">{e(sink)}</div>'
                         f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in o["used"]) or "none")}'
-                        f' — Free: {e(", ".join(PAIR_LABEL[p] for p in o["free"]) or "none")}</div>')
+                        f' — Free: {e(", ".join(PAIR_LABEL[p] for p in o["free"]) or "none")}</div>'
+                        f'<div class="sub" style="font-size:12px">Free channels: {e(fc or "none")}</div>')
         card_html.append(
             f'<div class="card"><div style="font-weight:600">{e(pc["description"] or pc["name"])}</div>'
             f'<div class="mono">{e(pc["name"])}</div>'
@@ -907,19 +970,27 @@ def render(st: dict) -> str:
                   f'<tbody>{"".join(zrows)}</tbody></table></div><pre id="zresult" hidden></pre>') if zrows else \
                  '<p class="sub" style="margin-top:14px">No zones running.</p>'
 
-    creatable = [c for c in st["cards"] if c["free"]]
+    creatable = [c for c in st["cards"] if c["free"] or c["free_channels"]]
     if creatable:
+        def free_opts(c):
+            d = {p: {"label": PAIR_LABEL[p], "name": c["free_names"].get(p)} for p in c["free"]}
+            if c["free_channels"]:
+                d["custom"] = {"label": "Custom…", "name": ""}
+            return d
         opts = "".join(
-            f'<option value="{e(c["name"])}" data-free="'
-            + e(json.dumps({p: {"label": PAIR_LABEL[p], "name": c["free_names"].get(p)} for p in c["free"]}))
-            + f'">{e(c["description"] or c["name"])}</option>' for c in creatable)
+            f'<option value="{e(c["name"])}" data-free="' + e(json.dumps(free_opts(c)))
+            + f'" data-chans="{e(json.dumps(c["free_channels"]))}" data-base="{e(c["name_base"])}">'
+            f'{e(c["description"] or c["name"])}</option>' for c in creatable)
         create_form = f"""<form class="create" onsubmit="return false">
 <div style="flex:1 1 260px"><label for="cc_card">Card</label><select id="cc_card" style="width:100%">{opts}</select></div>
-<div style="flex:1 1 180px"><label for="cc_pair">Channels (free pairs only)</label><select id="cc_pair" style="width:100%"></select></div>
+<div style="flex:1 1 180px"><label for="cc_pair">Channels (free only)</label><select id="cc_pair" style="width:100%"></select></div>
+<div id="cc_custom" hidden style="flex:2 1 300px;display:none;gap:12px" data-abbr="{e(json.dumps(rs.CHANNEL_ABBR))}">
+<div style="flex:1"><label for="cc_left">Left</label><select id="cc_left" style="width:100%"></select></div>
+<div style="flex:1"><label for="cc_right">Right</label><select id="cc_right" style="width:100%"></select></div></div>
 <div style="flex:2 1 320px"><span class="lbl">Will be created as</span><span class="preview" id="cc_preview"></span></div>
 <button class="btn pri" id="create" type="button">Create sink</button></form>"""
     else:
-        create_form = '<p class="sub" style="margin-top:14px">No free channel pairs left on any sound card.</p>'
+        create_form = '<p class="sub" style="margin-top:14px">No free channels left on any sound card.</p>'
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -995,7 +1066,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApplyError("bad request")
                 lines = apply_names(names)
             elif path == "/api/create":
-                lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")))
+                lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")),
+                                    str(body.get("left", "") or ""), str(body.get("right", "") or ""))
             elif path == "/api/profile":
                 lines = set_profile(str(body.get("card", "")), str(body.get("profile", "")))
             elif path == "/api/zone":
