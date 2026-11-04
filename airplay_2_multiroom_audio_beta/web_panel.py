@@ -9,6 +9,7 @@ set; that restarts only that zone.
 
   GET  /            the page
   GET  /api/state   the same data as JSON
+  GET  /api/debug/cards   raw `pactl list cards` output
   POST /api/apply   {"names": {"<option index>": "<new name>"}}: saves the
                     remap_sinks option through the Supervisor (so the
                     Configuration tab matches), then runs remap_sinks.py --load
@@ -79,6 +80,68 @@ def list_sinks() -> list:
         if key in ("Name", "Description", "Driver", "Channel Map"):
             cur[key.lower().replace(" ", "_")] = val.strip()
     return sinks
+
+
+PROFILE_RE = re.compile(r"^\s+(\S+): (.+?) \(sinks: (\d+), sources: (\d+), priority: (\d+)"
+                        r"(?:, available: (\w+))?\)\s*$")
+
+
+def pactl_text(*args) -> str:
+    try:
+        res = subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return res.stdout if res.returncode == 0 else ""
+
+
+def list_cards(text: str = None) -> list:
+    """[{name, driver, description, active, profiles: [{name, description,
+    sinks, available}]}] from `pactl list cards`."""
+    text = pactl_text("list", "cards") if text is None else text
+    cards, cur, section = [], None, None
+    for line in text.splitlines():
+        if line.startswith("Card #"):
+            cur = {"name": "", "driver": "", "description": "", "active": "", "profiles": []}
+            cards.append(cur)
+            section = None
+            continue
+        if cur is None or not line.strip():
+            continue
+        depth = len(line) - len(line.lstrip("\t"))
+        s = line.strip()
+        if depth == 1:
+            section = None
+            if s.startswith("Name:"):
+                cur["name"] = s[5:].strip()
+            elif s.startswith("Driver:"):
+                cur["driver"] = s[7:].strip()
+            elif s.startswith("Active Profile:"):
+                cur["active"] = s[15:].strip()
+            elif s in ("Properties:", "Profiles:", "Ports:"):
+                section = s[:-1]
+        elif depth == 2 and section == "Properties":
+            m = re.match(r'(\S+) = "(.*)"$', s)
+            if m and m.group(1) == "device.description":
+                cur["description"] = m.group(2)
+            elif m and m.group(1) == "alsa.card_name" and not cur["description"]:
+                cur["description"] = m.group(2)
+        elif depth == 2 and section == "Profiles":
+            m = PROFILE_RE.match(line)
+            if m:
+                cur["profiles"].append({"name": m.group(1), "description": m.group(2),
+                                        "sinks": int(m.group(3)),
+                                        "available": m.group(6) != "no"})
+    return cards
+
+
+def card_outputs(card_name: str, sink_names) -> list:
+    """The sinks that belong to a card, by PulseAudio's naming:
+    alsa_card.X -> alsa_output.X.*, bluez_card.X -> bluez_sink.X.*"""
+    for card_prefix, sink_prefix in (("alsa_card.", "alsa_output."), ("bluez_card.", "bluez_sink.")):
+        if card_name.startswith(card_prefix):
+            stem = sink_prefix + card_name[len(card_prefix):] + "."
+            return sorted(n for n in sink_names if n.startswith(stem))
+    return []
 
 
 def pair_of(args: str):
@@ -287,7 +350,10 @@ def state() -> dict:
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
         cards[-1]["free_names"] = {p: rs.system_name(s["name"], p, descs) for p in cards[-1]["free"]}
-    return {"zones": zones(), "cards": cards, "remap_sinks": remaps}
+    pa_cards = list_cards()
+    for c in pa_cards:
+        c["outputs"] = card_outputs(c["name"], [s["name"] for s in cards])
+    return {"zones": zones(), "pa_cards": pa_cards, "cards": cards, "remap_sinks": remaps}
 
 
 # -- apply ----------------------------------------------------------------
@@ -624,12 +690,37 @@ document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click'
 
 def render(st: dict) -> str:
     e = html.escape
-    cards = "".join(
-        f'<div class="card"><div style="font-weight:600">{e(c["description"])}</div>'
-        f'<div class="mono">{e(c["name"])}</div>'
-        f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in c["used"]) or "none")}'
-        f' — Free: {e(", ".join(PAIR_LABEL[p] for p in c["free"]) or "none")}</div></div>'
-        for c in st["cards"])
+    by_sink = {c["name"]: c for c in st["cards"]}
+    shown = set()
+    card_html = []
+    for i, pc in enumerate(st["pa_cards"]):
+        opts = "".join(
+            f'<option value="{e(p["name"])}"{" selected" if p["name"] == pc["active"] else ""}>'
+            f'{e(p["description"])}{"" if p["available"] else " (unplugged)"}</option>'
+            for p in pc["profiles"])
+        outs = []
+        for sink in pc["outputs"]:
+            shown.add(sink)
+            o = by_sink[sink]
+            outs.append(f'<div class="mono" style="margin-top:4px">{e(sink)}</div>'
+                        f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in o["used"]) or "none")}'
+                        f' — Free: {e(", ".join(PAIR_LABEL[p] for p in o["free"]) or "none")}</div>')
+        card_html.append(
+            f'<div class="card"><div style="font-weight:600">{e(pc["description"] or pc["name"])}</div>'
+            f'<div class="mono">{e(pc["name"])}</div>'
+            f'<label for="cp_{i}" class="sub" style="font-size:12px;margin-top:4px">Profile</label>'
+            f'<select id="cp_{i}" disabled style="min-height:40px;padding:0 10px;border-radius:8px;'
+            f'border:1px solid #353b46;background:#111318;color:#e6e8eb">{opts}</select>'
+            + ("".join(outs) or '<div class="sub">No output with this profile</div>') + '</div>')
+    # Sound-card sinks no PulseAudio card claims (unusual) still get shown.
+    for c in st["cards"]:
+        if c["name"] not in shown:
+            card_html.append(
+                f'<div class="card"><div style="font-weight:600">{e(c["description"])}</div>'
+                f'<div class="mono">{e(c["name"])}</div>'
+                f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in c["used"]) or "none")}'
+                f' — Free: {e(", ".join(PAIR_LABEL[p] for p in c["free"]) or "none")}</div></div>')
+    cards = "".join(card_html)
 
     rows = []
     for r in st["remap_sinks"]:
@@ -726,7 +817,7 @@ def render(st: dict) -> str:
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
 <section><h1>Zones</h1><p class="sub">Every running AirPlay 2 receiver.</p>{zones_html}</section>
-<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones.</p>
+<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Profiles are shown read-only for now.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div></section>
 <section><h2>Remap sinks</h2><p class="sub">Rename a managed sink and Apply. The system name stays as a reference.</p>
 <div class="box"><table><thead><tr><th>Sink name</th><th>System name</th><th>Card</th>
@@ -761,6 +852,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path in ("", "/index.html"):
                 self._send(200, render(state()), "text/html; charset=utf-8")
+            elif path == "/api/debug/cards":
+                self._send(200, pactl_text("list", "cards") or "(pactl list cards returned nothing)\n",
+                           "text/plain; charset=utf-8")
             elif path == "/api/state":
                 self._send(200, json.dumps(state(), indent=2), "application/json")
             else:
