@@ -5,6 +5,14 @@ configuration:
       Verbosity of the per-zone shairport-sync logs. v is the least detailed,
       vv (the default) adds more, and vvv is the most detailed and grows the
       logs fastest. Restart the add-on after changing it.
+  combine_sinks:
+    name: Combine sinks
+    description: >-
+      A sink that plays to several other sinks at once (PulseAudio
+      module-combine-sink), with its own AirPlay 2 zone. sinks is a
+      comma-separated list of at least two sink names, e.g. Back_Yard,Workshop.
+      Loaded after the remap sinks; if a member is missing it isn't loaded.
+      Members on different sound cards are kept in sync by resampling.
   card_profiles:
     name: Card profiles
     description: >-
