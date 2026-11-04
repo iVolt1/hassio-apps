@@ -6,6 +6,16 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: managed remap sinks can be renamed. Apply saves the `remap_sinks` option
+  through the Supervisor (so the Configuration tab matches), then applies it at once with
+  no add-on restart: the old sink is unloaded, the new one loaded, and the zone manager
+  restarts the zone under its new name. The panel shows the result lines. Needs
+  `hassio_api: true`, used only to save this add-on's own options.
+
+### Fixed
+- `remap_sinks`: a renamed sink was skipped as clashing with its own old copy. Sinks the
+  add-on is about to unload no longer count as using their channels, and removals now run
+  before loads. Runs of `remap_sinks.py` are serialized with a lock.
 - Web panel in the Home Assistant sidebar ("AirPlay 2 Zones", via Ingress), read-only for
   now: sound cards with their used and free channel pairs, and every remap sink with its
   system name (with a copy button), card, channels, whether the add-on manages it, and

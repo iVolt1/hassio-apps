@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
 web_panel.py -- the add-on's web panel, shown in Home Assistant's sidebar
-through Ingress. Read-only for now: sound cards, remap sinks (with their
-system names) and whether each zone is running.
+through Ingress: sound cards, remap sinks (with their system names) and
+whether each zone is running. Managed sinks can be renamed.
 
-  GET /            the page
-  GET /api/state   the same data as JSON
+  GET  /            the page
+  GET  /api/state   the same data as JSON
+  POST /api/apply   {"names": {"<option index>": "<new name>"}}: saves the
+                    remap_sinks option through the Supervisor (so the
+                    Configuration tab matches), then runs remap_sinks.py --load
+                    and returns its log lines
 
 Python standard library only. Runs in the host network namespace even when
 ap2_ip is set, so Ingress can reach it; it only talks to PulseAudio through
@@ -21,6 +25,8 @@ import logging
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,7 +34,9 @@ import remap_sinks as rs
 
 PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
 ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").split(","))
-ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
+OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
+SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
+REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
 
 log = logging.getLogger("web_panel")
 
@@ -93,14 +101,14 @@ def state() -> dict:
     running = running_zones()
 
     configured = {}
-    for entry in rs.load_options():
+    for index, entry in enumerate(rs.load_options()):
         if not isinstance(entry, dict):
             continue
         master = str(entry.get("master", "")).strip()
         pair = str(entry.get("channels", "")).strip()
         name = str(entry.get("name", "") or "").strip() or rs.system_name(master, pair, descs)
         if name:
-            configured[name] = {"master": master, "pair": pair}
+            configured[name] = {"master": master, "pair": pair, "index": index}
 
     remaps, used = [], {}
     for args in loaded:
@@ -116,6 +124,7 @@ def state() -> dict:
             "pair": pair,
             "channels": PAIR_LABEL.get(pair, rs.arg_of(args, "master_channel_map") or "?"),
             "managed": name in configured,
+            "index": configured[name]["index"] if name in configured else None,
             "loaded": True,
             "zone_running": name in running,
         })
@@ -126,8 +135,11 @@ def state() -> dict:
                 "system_name": rs.system_name(c["master"], c["pair"], descs),
                 "master": c["master"], "master_description": descs.get(c["master"], ""),
                 "pair": c["pair"], "channels": PAIR_LABEL.get(c["pair"], c["pair"]),
-                "managed": True, "loaded": False, "zone_running": False,
+                "managed": True, "index": c["index"], "loaded": False, "zone_running": False,
             })
+
+    # Option order, then unmanaged sinks, so a renamed sink stays in place.
+    remaps.sort(key=lambda r: (r["index"] is None, r["index"] or 0, r["name"] or ""))
 
     cards = []
     for s in sinks:
@@ -144,6 +156,87 @@ def state() -> dict:
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
     return {"cards": cards, "remap_sinks": remaps}
+
+
+# -- apply ----------------------------------------------------------------
+class ApplyError(Exception):
+    pass
+
+
+def save_options(options: dict) -> None:
+    """Saves the add-on's whole options through the Supervisor (validated
+    against the schema there), then writes /data/options.json, which the
+    Supervisor otherwise only rewrites when the add-on starts."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        raise ApplyError("no SUPERVISOR_TOKEN (hassio_api missing from config.yaml?)")
+    req = urllib.request.Request(
+        f"{SUPERVISOR_URL}/addons/self/options",
+        data=json.dumps({"options": options}).encode(), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"{}")
+        except ValueError:
+            body = {}
+        raise ApplyError(f"Supervisor refused the options: {body.get('message') or e}")
+    except (OSError, ValueError) as e:
+        raise ApplyError(f"cannot reach the Supervisor: {e}")
+    if body.get("result") != "ok":
+        raise ApplyError(f"Supervisor refused the options: {body.get('message') or body}")
+    tmp = OPTIONS_FILE.with_name(OPTIONS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(options))
+    os.replace(tmp, OPTIONS_FILE)
+
+
+def apply_names(names: dict) -> list:
+    """Renames option entries ({index: new name}), saves, applies. Returns
+    the log lines to show."""
+    try:
+        options = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError) as e:
+        raise ApplyError(f"cannot read {OPTIONS_FILE}: {e}")
+    entries = options.get("remap_sinks") or []
+    descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
+
+    lines = []
+    for key, new in names.items():
+        try:
+            i = int(key)
+            entry = entries[i]
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError(f"no remap_sinks entry #{key}; reload the page")
+        new = str(new).strip()
+        if not rs.NAME_RE.match(new):
+            raise ApplyError(f"'{new}': letters, digits, _ . - only")
+        old = entry.get("name") or rs.system_name(entry.get("master", ""),
+                                                   entry.get("channels", ""), descs)
+        if new != old:
+            entry["name"] = new
+            lines.append(f"rename {old} -> {new}")
+    if not lines:
+        return ["nothing changed"]
+
+    resolved = [e.get("name") or rs.system_name(e.get("master", ""), e.get("channels", ""), descs)
+                for e in entries]
+    dupes = {n for n in resolved if n and resolved.count(n) > 1}
+    if dupes:
+        raise ApplyError(f"name used twice: {', '.join(sorted(dupes))}")
+
+    save_options(options)
+    lines.append("options saved")
+    try:
+        res = subprocess.run(["python3", "-I", REMAP_SINKS, "--load"], capture_output=True,
+                             text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ApplyError(f"options saved, but applying failed: {e}")
+    lines += [l for l in res.stdout.splitlines() + res.stderr.splitlines()
+              if not l.startswith(("[remap_sinks] +", "[remap_sinks] -", "[remap_sinks] @",
+                                   "[remap_sinks]  "))]
+    return lines
 
 
 # -- page -----------------------------------------------------------------
@@ -165,6 +258,14 @@ td.sys{white-space:nowrap}
 td.name{font-family:ui-monospace,monospace;font-size:13px;color:#e6e8eb}
 button.copy{width:32px;height:32px;border:1px solid #353b46;border-radius:6px;background:transparent;color:#b8c0ca;cursor:pointer;vertical-align:middle;margin-left:6px}
 .warn{color:#f0b26a}
+input.nm{width:100%;min-height:40px;padding:0 10px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:13px ui-monospace,monospace;box-sizing:border-box}
+input.nm.changed{border-color:#4a6a96}
+.bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}
+.btn{min-height:44px;padding:0 18px;border-radius:8px;font:600 14px system-ui,sans-serif;cursor:pointer}
+.btn.pri{border:0;background:#3d8bfd;color:#0b1220}.btn.sec{border:1px solid #353b46;background:transparent;color:#e6e8eb;font-weight:500}
+.btn:disabled{opacity:.5;cursor:default}
+pre#result{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
+pre#result.err{color:#f0b26a}
 """
 
 COPY_ICON = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -172,6 +273,27 @@ COPY_ICON = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke
              '</rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>')
 
 SCRIPT = """
+const inputs = [...document.querySelectorAll('input.nm')];
+const applyBtn = document.getElementById('apply'), discardBtn = document.getElementById('discard');
+const changed = () => inputs.filter(i => i.value.trim() !== i.defaultValue);
+const refresh = () => { inputs.forEach(i => i.classList.toggle('changed', i.value.trim() !== i.defaultValue));
+  const n = changed().length; if (applyBtn) { applyBtn.disabled = !n; discardBtn.disabled = !n; } };
+inputs.forEach(i => i.addEventListener('input', refresh));
+if (discardBtn) discardBtn.addEventListener('click', () => { inputs.forEach(i => i.value = i.defaultValue); refresh(); });
+if (applyBtn) applyBtn.addEventListener('click', async () => {
+  const names = {}; changed().forEach(i => names[i.dataset.index] = i.value.trim());
+  const out = document.getElementById('result');
+  applyBtn.disabled = discardBtn.disabled = true; out.hidden = false; out.className = ''; out.textContent = 'Applying...';
+  try {
+    const r = await fetch('api/apply', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                        body: JSON.stringify({names})});
+    const j = await r.json();
+    out.textContent = (j.lines || []).join('\\n') + (j.error ? '\\n' + j.error : '');
+    if (!j.ok) { out.className = 'err'; refresh(); return; }
+    out.textContent += '\\n\\nReloading in 3 s...'; setTimeout(() => location.reload(), 3000);
+  } catch (e) { out.className = 'err'; out.textContent = 'Request failed: ' + e; refresh(); }
+});
+refresh();
 document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click', () => {
   const t = b.dataset.text;
   (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
@@ -200,7 +322,12 @@ def render(st: dict) -> str:
         else:
             st_txt = ("Zone running" if r["zone_running"] else "No zone running") + \
                      ("" if r["managed"] else " · unmanaged")
-        rows.append(f'<tr><td class="name">{e(r["name"] or "?")}</td><td class="sys">{sysn}</td>'
+        if r["index"] is not None:
+            name_cell = (f'<td><input class="nm" data-index="{r["index"]}" value="{e(r["name"])}" '
+                         f'aria-label="Sink name for {e(r["system_name"] or r["name"])}"></td>')
+        else:
+            name_cell = f'<td class="name">{e(r["name"] or "?")}</td>'
+        rows.append(f'<tr>{name_cell}<td class="sys">{sysn}</td>'
                     f'<td>{e(r["master_description"] or r["master"])}</td>'
                     f'<td>{e(r["channels"])}</td><td>{st_txt}</td></tr>')
 
@@ -211,9 +338,13 @@ def render(st: dict) -> str:
 <main>
 <section><h1>Sound cards</h1><p class="sub">Free pairs can become new zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div></section>
-<section><h2>Remap sinks</h2><p class="sub">Read-only for now. Change them in the Configuration tab.</p>
+<section><h2>Remap sinks</h2><p class="sub">Rename a managed sink and Apply. The system name stays as a reference.</p>
 <div class="box"><table><thead><tr><th>Sink name</th><th>System name</th><th>Card</th>
-<th>Channels</th><th>State</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
+<th>Channels</th><th>State</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+<div class="bar"><p class="sub" style="margin:0">Renaming a sink renames its zone, so Music Assistant sees it as a new player.</p>
+<div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>
+<button class="btn pri" id="apply" disabled>Apply</button></div></div>
+<pre id="result" hidden></pre></section>
 </main><script>{SCRIPT}</script></body></html>"""
 
 
@@ -247,6 +378,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # keep serving; the traceback goes to the log
             log.exception("error serving %s", self.path)
             self._send(500, "Internal error, see web_panel.log\n", "text/plain")
+
+    def do_POST(self):
+        ip = self.client_address[0]
+        if ip not in ALLOWED:
+            log.warning("refused POST %s from %s", self.path, ip)
+            self._send(403, "Forbidden\n", "text/plain")
+            return
+        if self.path.split("?", 1)[0].rstrip("/") != "/api/apply":
+            self._send(404, "Not found\n", "text/plain")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            names = json.loads(self.rfile.read(min(length, 65536)) or b"{}").get("names") or {}
+            if not isinstance(names, dict):
+                raise ApplyError("bad request")
+            log.info("apply requested: %s", names)
+            lines = apply_names(names)
+            for l in lines:
+                log.info("apply: %s", l)
+            result = {"ok": True, "lines": lines}
+        except ApplyError as e:
+            log.warning("apply failed: %s", e)
+            result = {"ok": False, "lines": [], "error": str(e)}
+        except Exception as e:  # keep serving; the traceback goes to the log
+            log.exception("apply crashed")
+            result = {"ok": False, "lines": [], "error": f"internal error: {e}"}
+        self._send(200, json.dumps(result), "application/json")
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.client_address[0], fmt % args)
