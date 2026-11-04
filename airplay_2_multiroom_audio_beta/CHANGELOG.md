@@ -6,6 +6,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: **Zones** section listing every running AirPlay 2 receiver (sound-card,
+  Bluetooth and Cast Bridge zones): name, type, what it plays to, RTSP port, overrides set
+  in its `<zone>-ap2.custom` file (latency offset, max volume, custom name), whether it is
+  playing, and uptime. Read from the running shairport-sync processes, so it shows what
+  is actually running. `/api/state` includes it as `zones`.
 - Web panel: **Create sink** — pick a sound card and one of its free channel pairs; the
   sink is added to `remap_sinks` under its system name (shown before you create it) and
   loaded at once, and its zone starts. Rename it afterwards like any other sink.
