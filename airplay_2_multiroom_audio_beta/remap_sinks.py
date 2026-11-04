@@ -29,6 +29,7 @@ Usage: remap_sinks.py [--load] [--dry-run]
 """
 
 import difflib
+import fcntl
 import json
 import os
 import re
@@ -230,7 +231,14 @@ def build_block(entries: list, old: str = ""):
     names = {n for n, _ in configured}
 
     loaded = loaded_remap_modules()
-    unmanaged = [a for a in (loaded or []) if sink_name_of(a) not in names]
+    # Sinks this add-on loaded whose entry is gone (e.g. renamed) are about to
+    # be unloaded: they neither count as unmanaged nor block their channels.
+    state = load_state()
+    leaving = {sink_name_of(a) for a in (loaded or [])
+               if sink_name_of(a) not in names and sink_name_of(a) in state
+               and same(a, state[sink_name_of(a)])}
+    unmanaged = [a for a in (loaded or [])
+                 if sink_name_of(a) not in names and sink_name_of(a) not in leaving]
 
     # Channels already in use: unmanaged sinks first, then configured ones
     # in option order, so the first entry to claim a pair keeps it.
@@ -316,13 +324,28 @@ def save_state(st: dict) -> None:
 
 
 def apply(loadable: list, loaded, configured: set) -> None:
-    """Makes PulseAudio match the options. Runs before the zone manager
-    starts, so zones only ever see the final set of sinks."""
+    """Makes PulseAudio match the options. At start-up this runs before the
+    zone manager starts; from the web panel, the zone manager follows the
+    sink changes (stops removed zones, starts new ones)."""
     if loaded is None:
         log("pactl not available; not loading or unloading any sinks")
         return
     current = {sink_name_of(a): a for a in loaded}
     state = load_state()
+
+    # Entries removed from the options first, so a renamed sink's old copy is
+    # gone before the new one loads. Usable-but-skipped entries are still
+    # configured, so they keep their state and their sink.
+    for name in [n for n in state if n not in configured]:
+        if name not in current:
+            log(f"{name} was removed from the options and is not loaded")
+        elif same(current[name], state[name]):
+            if unload(name):
+                log(f"unloaded {name} (removed from the options)")
+        else:
+            log(f"{name} was removed from the options but is loaded with arguments "
+                "this add-on did not set; leaving it")
+        del state[name]
 
     for name, args in loadable:
         if name not in current:
@@ -340,19 +363,6 @@ def apply(loadable: list, loaded, configured: set) -> None:
                     log(f"restoring the previous {name}")
                     load(name, current[name])
 
-    # Entries removed from the options. Usable-but-skipped entries are still
-    # configured, so they keep their state and their sink.
-    for name in [n for n in state if n not in configured]:
-        if name not in current:
-            log(f"{name} was removed from the options and is not loaded")
-        elif same(current[name], state[name]):
-            if unload(name):
-                log(f"unloaded {name} (removed from the options)")
-        else:
-            log(f"{name} was removed from the options but is loaded with arguments "
-                "this add-on did not set; leaving it")
-        del state[name]
-
     save_state(state)
 
 
@@ -369,6 +379,9 @@ def splice(old: str, block: list) -> str:
 
 
 def main() -> int:
+    # The web panel and the start-up hook may both run this; one at a time.
+    lock = open(os.environ.get("RS_LOCK_FILE", "/tmp/remap_sinks.lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
     old = CUSTOM_PA.read_text() if CUSTOM_PA.exists() else ""

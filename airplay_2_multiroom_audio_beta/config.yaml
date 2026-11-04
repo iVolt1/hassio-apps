@@ -1,5 +1,5 @@
 name: Airplay2 Multiroom Audio Beta
-version: 0.117
+version: 0.118
 slug: airplay_2_multiroom_audio_beta
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
@@ -13,6 +13,9 @@ ingress: true
 ingress_port: 8285
 panel_icon: mdi:speaker-multiple
 panel_title: AirPlay 2 Zones
+# Only so the web panel can save this add-on's own options (POST
+# /addons/self/options); the default hassio_role allows nothing broader.
+hassio_api: true
 # NET_ADMIN/SYS_ADMIN + apparmor off: only needed for the optional ap2_ip
 # mode (own LAN IP in a private network namespace, so nqptp's UDP 319/320
 # doesn't collide with Music Assistant's cliairplay on the same host).
