@@ -57,7 +57,45 @@ PAIRS = {
     "stereo": "front-left,front-right",
 }
 
+# Suffix of a sink's system name, the same style Multi-room Audio Controller
+# uses: "<master description>_<pair>", e.g. Creative_X-Fi_Analog_Surround_7_1_rl_rr
+PAIR_SUFFIX = {
+    "front": "fl_fr",
+    "rear": "rl_rr",
+    "side": "sl_sr",
+    "center_lfe": "fc_lfe",
+    "stereo": "fl_fr",
+}
+
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def sink_descriptions() -> dict:
+    """sink name -> Description for every sink, or {} if pactl can't be
+    queried."""
+    try:
+        res = subprocess.run(["pactl", "list", "sinks"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    out, name = {}, None
+    for line in res.stdout.splitlines() if res.returncode == 0 else []:
+        s = line.strip()
+        if s.startswith("Name:"):
+            name = s[5:].strip()
+        elif s.startswith("Description:") and name:
+            out[name] = s[12:].strip()
+    return out
+
+
+def system_name(master: str, pair: str, descs: dict):
+    """Default sink name: the master's description, cleaned up, plus the
+    pair. None if the master isn't known to PulseAudio."""
+    desc = descs.get(master)
+    if not desc or pair not in PAIR_SUFFIX:
+        return None
+    base = re.sub(r"[^A-Za-z0-9]+", "_", desc).strip("_")
+    return f"{base}_{PAIR_SUFFIX[pair]}" if base else None
 
 
 def log(msg: str) -> None:
@@ -74,13 +112,22 @@ def load_options() -> list:
     return sinks if isinstance(sinks, list) else []
 
 
-def module_line(entry: dict):
+def module_line(entry: dict, descs: dict = None):
     """The load-module line for one option entry, or None (with a log line
-    saying why) if the entry is unusable."""
-    name = str(entry.get("name", "")).strip()
+    saying why) if the entry is unusable. An entry without a name gets its
+    system name."""
+    name = str(entry.get("name", "") or "").strip()
     master = str(entry.get("master", "")).strip()
     pair = str(entry.get("channels", "")).strip()
     desc = str(entry.get("description", "") or "").strip()
+
+    if not name:
+        name = system_name(master, pair, descs or {}) or ""
+        if not name:
+            log(f"skipping unnamed entry on {master or '?'}: master not found in "
+                "PulseAudio, so it has no system name; give it a name")
+            return None
+        log(f"unnamed entry on {master} ({pair}) uses its system name {name}")
 
     if not NAME_RE.match(name):
         log(f"skipping entry with invalid name {name!r} (letters, digits, _ . - only)")
@@ -171,8 +218,9 @@ def build_block(entries: list, old: str = ""):
              "# Generated from the add-on's remap_sinks option. Edits inside this",
              "# block are overwritten; put your own lines outside it."]
     configured = []
+    descs = sink_descriptions()
     for entry in entries:
-        line = module_line(entry if isinstance(entry, dict) else {})
+        line = module_line(entry if isinstance(entry, dict) else {}, descs)
         if line:
             name = sink_name_of(line)
             if any(n == name for n, _ in configured):

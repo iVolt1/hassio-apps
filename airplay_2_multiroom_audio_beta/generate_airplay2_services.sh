@@ -39,6 +39,7 @@ echo "# AirPlay 2 services generated on $(date)" > "$log_file"
 mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
 : > /config/shairport-sync/logs/sink_zone_manager.log
 : > /config/cast-bridge/logs/cast_bridge_manager.log
+: > /config/shairport-sync/logs/web_panel.log
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
 CONTENTS_DIR="${BASE_DIR}/user/contents.d"
@@ -473,4 +474,21 @@ exec ${NETNS_EXEC}python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sy
 EOF
     chmod +x "${SINK_ZONE_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-sink-zone-manager"
+fi
+
+# Web panel (Ingress). Deliberately NOT under NETNS_EXEC: Ingress connects to
+# the host's address, and the panel only needs the PulseAudio socket, which
+# works from either network namespace. Not run with -I: it imports
+# remap_sinks.py from its own directory.
+WEB_PANEL_SERVICE="${BASE_DIR}/airplay2-web-panel"
+if [ ! -d "$WEB_PANEL_SERVICE" ]; then
+    mkdir -p "$WEB_PANEL_SERVICE"
+    echo "longrun" > "${WEB_PANEL_SERVICE}/type"
+    cat > "${WEB_PANEL_SERVICE}/run" <<'EOF'
+#!/usr/bin/with-contenv bashio
+mkdir -p /config/shairport-sync/logs
+exec python3 /usr/sbin/web_panel.py >> /config/shairport-sync/logs/web_panel.log 2>&1
+EOF
+    chmod +x "${WEB_PANEL_SERVICE}/run"
+    touch "${CONTENTS_DIR}/airplay2-web-panel"
 fi

@@ -6,6 +6,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel in the Home Assistant sidebar ("AirPlay 2 Zones", via Ingress), read-only for
+  now: sound cards with their used and free channel pairs, and every remap sink with its
+  system name (with a copy button), card, channels, whether the add-on manages it, and
+  whether its zone is running. `/api/state` returns the same data as JSON. Only Home
+  Assistant's Ingress proxy and localhost may connect. Log: `web_panel.log`.
+- `remap_sinks` entries may leave `name` empty. They then get a system name in the same
+  style as the Multi-room Audio Controller: the card's description plus the pair
+  (`fl_fr`, `rl_rr`, `sl_sr`, `fc_lfe`), e.g. `Creative_X_Fi_Analog_Surround_7_1_rl_rr`.
 - `remap_sinks` now fully applies at every start: a sink whose entry changed is unloaded
   and reloaded with the new settings (the previous one is restored if the new one fails
   to load), and a sink this add-on loaded whose entry was removed is unloaded. The add-on

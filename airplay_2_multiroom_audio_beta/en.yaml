@@ -8,6 +8,8 @@ configuration:
   remap_sinks:
     name: Remap sinks
     description: >-
+      Leave name empty to use the sink's system name (the card's description
+      plus the pair, e.g. Creative_X_Fi_Analog_Surround_7_1_rl_rr).
       Stereo sinks to carve out of a sound card, one per zone. channels picks
       which pair of the master's outputs the zone plays on (stereo = a plain
       2-channel card or USB DAC). Applied every time the add-on starts:
