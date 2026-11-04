@@ -6,6 +6,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: **Create sink** — pick a sound card and one of its free channel pairs; the
+  sink is added to `remap_sinks` under its system name (shown before you create it) and
+  loaded at once, and its zone starts. Rename it afterwards like any other sink.
+- Web panel: **Adopt** — an unmanaged remap sink (e.g. one made by the Multi-room Audio
+  Controller) is added to `remap_sinks` under its current name, keeping its description,
+  so its zone and Music Assistant player stay the same; it is reloaded once with this
+  add-on's settings. Sinks whose channels can't be expressed in the options (such as
+  `lfe,lfe`) show why they can't be adopted.
 - Web panel: managed remap sinks can be renamed. Apply saves the `remap_sinks` option
   through the Supervisor (so the Configuration tab matches), then applies it at once with
   no add-on restart: the old sink is unloaded, the new one loaded, and the zone manager
