@@ -70,6 +70,29 @@ PAIR_SUFFIX = {
     "stereo": "fl_fr",
 }
 
+# channels: custom takes any two of the master's channels (left, right; the
+# same one twice makes a mono zone). Abbreviations are for system names.
+CHANNEL_ABBR = {
+    "mono": "mono", "front-left": "fl", "front-right": "fr", "front-center": "fc",
+    "rear-left": "rl", "rear-right": "rr", "rear-center": "rc", "lfe": "lfe",
+    "side-left": "sl", "side-right": "sr", "front-left-of-center": "flc",
+    "front-right-of-center": "frc",
+}
+CHANNEL_RE = re.compile(r"^(?:" + "|".join(map(re.escape, CHANNEL_ABBR)) + r"|aux\d{1,2}|top-[a-z-]+)$")
+
+
+def channel_abbr(ch: str) -> str:
+    return CHANNEL_ABBR.get(ch) or re.sub(r"[^a-z0-9]+", "", ch)
+
+
+def master_channels(pair: str, left: str = "", right: str = ""):
+    """master_channel_map for a channels choice, or None if invalid."""
+    if pair == "custom":
+        if CHANNEL_RE.match(left or "") and CHANNEL_RE.match(right or ""):
+            return f"{left},{right}"
+        return None
+    return PAIRS.get(pair)
+
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -91,14 +114,26 @@ def sink_descriptions() -> dict:
     return out
 
 
-def system_name(master: str, pair: str, descs: dict):
+def system_name(master: str, pair: str, descs: dict, left: str = "", right: str = ""):
     """Default sink name: the master's description, cleaned up, plus the
-    pair. None if the master isn't known to PulseAudio."""
+    pair (for custom, the two channels' abbreviations). None if the master
+    isn't known to PulseAudio."""
     desc = descs.get(master)
-    if not desc or pair not in PAIR_SUFFIX:
+    if pair == "custom":
+        suffix = (f"{channel_abbr(left)}_{channel_abbr(right)}"
+                  if master_channels(pair, left, right) else None)
+    else:
+        suffix = PAIR_SUFFIX.get(pair)
+    if not desc or not suffix:
         return None
     base = re.sub(r"[^A-Za-z0-9]+", "_", desc).strip("_")
-    return f"{base}_{PAIR_SUFFIX[pair]}" if base else None
+    return f"{base}_{suffix}" if base else None
+
+
+def entry_system_name(entry: dict, descs: dict):
+    """system_name() for a remap_sinks option entry."""
+    return system_name(str(entry.get("master", "")), str(entry.get("channels", "")), descs,
+                       str(entry.get("left", "") or ""), str(entry.get("right", "") or ""))
 
 
 def log(msg: str) -> None:
@@ -189,10 +224,12 @@ def module_line(entry: dict, descs: dict = None):
     name = str(entry.get("name", "") or "").strip()
     master = str(entry.get("master", "")).strip()
     pair = str(entry.get("channels", "")).strip()
+    left = str(entry.get("left", "") or "").strip()
+    right = str(entry.get("right", "") or "").strip()
     desc = str(entry.get("description", "") or "").strip()
 
     if not name:
-        name = system_name(master, pair, descs or {}) or ""
+        name = system_name(master, pair, descs or {}, left, right) or ""
         if not name:
             log(f"skipping unnamed entry on {master or '?'}: master not found in "
                 "PulseAudio, so it has no system name; give it a name")
@@ -205,15 +242,20 @@ def module_line(entry: dict, descs: dict = None):
     if not master or not NAME_RE.match(master):
         log(f"skipping {name}: invalid or missing master {master!r}")
         return None
-    if pair not in PAIRS:
-        log(f"skipping {name}: channels must be one of {', '.join(PAIRS)}, got {pair!r}")
+    if pair not in PAIRS and pair != "custom":
+        log(f"skipping {name}: channels must be one of {', '.join(PAIRS)}, custom; got {pair!r}")
+        return None
+    mcm = master_channels(pair, left, right)
+    if not mcm:
+        log(f"skipping {name}: channels custom needs left and right set to channel names "
+            f"such as front-center or side-left (got {left!r}, {right!r})")
         return None
 
     args = [
         f"sink_name={name}",
         f"master={master}",
         "channels=2",
-        f"master_channel_map={PAIRS[pair]}",
+        f"master_channel_map={mcm}",
         "channel_map=front-left,front-right",
         "remix=no",
     ]

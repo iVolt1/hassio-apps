@@ -6,6 +6,19 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Custom channel pairs: `remap_sinks` entries can use `channels: custom` with `left` and
+  `right` set to any two channels of the card (e.g. `front-center` + `side-left`; the same
+  channel twice makes a mono zone). System names use the channel abbreviations
+  (`..._fc_sl`, `..._lfe_lfe`). The clash check, profile switches and `custom.pa` all
+  handle them per channel.
+- Web panel: **Create sink** has a **Custom…** choice with Left and Right lists of the
+  card's free channels; each card shows its free channels; sinks with any two-channel
+  map (such as an `lfe,lfe` sink) can now be adopted.
+
+### Fixed
+- Web panel: switching a card's profile no longer renames entries that use their system
+  name (which comes from the old sink's description): they keep their name, now stored
+  explicitly, so their zone and Music Assistant player stay the same.
 - Card profiles: a `card_profiles` option (card + profile) set at every start before the
   remap sinks load; cards not listed keep the profile PulseAudio gives them.
 - Web panel: each sound card's **Profile** can be changed. After a confirm step listing the
