@@ -6,6 +6,16 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Card profiles: a `card_profiles` option (card + profile) set at every start before the
+  remap sinks load; cards not listed keep the profile PulseAudio gives them.
+- Web panel: each sound card's **Profile** can be changed. After a confirm step listing the
+  card's zones, the profile is switched at once and saved in `card_profiles`, and the card's
+  `remap_sinks` entries are moved to its new output sink where their channel pair still
+  exists, so those zones come back under the same name and Music Assistant player. Entries
+  whose pair the new profile lacks stay in the options and return when you switch back.
+- `remap_sinks`: an entry whose master sink doesn't exist right now (e.g. its card is on
+  another profile, or unplugged) is not loaded and is marked in `custom.pa`, instead of
+  failing in PulseAudio.
 - Web panel: the Sound cards section now lists PulseAudio's cards (including ones set to
   Off) with their active profile and the profiles they offer (unplugged ones marked), and
   each card's output sink(s) with used and free channel pairs. Read-only for now.
