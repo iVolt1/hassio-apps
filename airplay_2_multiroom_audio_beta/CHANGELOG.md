@@ -6,6 +6,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: sound-card and Bluetooth zones have an **Edit** form for AirPlay name, latency
+  offset (ms) and max volume (dB). Saving writes them to a marked block in the zone's
+  `<zone>-ap2.custom` file (an empty field leaves that setting out; your own lines outside
+  the block are kept) and restarts only that zone, which the zone manager starts again at
+  once with the new settings. A setting you already set by hand in that file is shown
+  locked, since libconfig rejects a setting set twice. Cast Bridge zones are read-only.
 - Web panel: **Zones** section listing every running AirPlay 2 receiver (sound-card,
   Bluetooth and Cast Bridge zones): name, type, what it plays to, RTSP port, overrides set
   in its `<zone>-ap2.custom` file (latency offset, max volume, custom name), whether it is

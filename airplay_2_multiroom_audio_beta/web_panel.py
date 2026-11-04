@@ -3,7 +3,9 @@
 web_panel.py -- the add-on's web panel, shown in Home Assistant's sidebar
 through Ingress: the running AirPlay 2 zones, sound cards, remap sinks
 (with their system names) and whether each zone is running. Managed sinks can be renamed, new ones
-created on a free pair, and unmanaged ones adopted.
+created on a free pair, and unmanaged ones adopted. Sound-card and
+Bluetooth zones can have their AirPlay name, latency offset and max volume
+set; that restarts only that zone.
 
   GET  /            the page
   GET  /api/state   the same data as JSON
@@ -15,6 +17,10 @@ created on a free pair, and unmanaged ones adopted.
                     pair, named with its system name, then the same as apply
   POST /api/adopt   {"name": ...}: adds an unmanaged sink to the options
                     under its current name, then the same as apply
+  POST /api/zone    {"key", "name", "offset_ms", "volume_max_db"}: writes
+                    those (empty = not set) to a managed block in the zone's
+                    <key>-ap2.custom file and restarts that zone's
+                    shairport-sync; sink_zone_manager starts it again at once
 
 Python standard library only. Runs in the host network namespace even when
 ap2_ip is set, so Ingress can reach it; it only talks to PulseAudio through
@@ -29,6 +35,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import urllib.error
 import urllib.request
@@ -140,17 +147,33 @@ def streaming_pids() -> set:
 
 
 def conf_value(text: str, key: str):
-    m = re.search(r'^\s*' + re.escape(key) + r'\s*=\s*"?([^";]*)"?\s*;', text, re.M)
-    return m.group(1).strip() if m else None
+    """An uncommented `key = value;` from a libconfig file; a quoted value is
+    unescaped the same way sink_zone_manager reads a custom name."""
+    m = re.search(r'^\s*' + re.escape(key) + r'\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^";]*?))\s*;',
+                  text, re.M)
+    if not m:
+        return None
+    if m.group(1) is not None:
+        return re.sub(r'\\(.)', r'\1', m.group(1))
+    return m.group(2).strip()
 
 
-def read_custom(path: Path) -> dict:
+def read_custom(path: Path, part: str = "all") -> dict:
     """The overrides this panel knows about, from a zone's -ap2.custom file
-    (uncommented lines only)."""
+    (uncommented lines only). part: "all", "managed" (the panel's block) or
+    "hand" (everything outside it)."""
     try:
         text = path.read_text()
     except OSError:
         return {}
+    if part == "hand":
+        text = strip_block(text)
+    elif part == "managed":
+        lines = text.splitlines()
+        try:
+            text = "\n".join(lines[lines.index(ZBEGIN):lines.index(ZEND, lines.index(ZBEGIN))])
+        except ValueError:
+            text = ""
     return {short: conf_value(text, key) for key, short in CUSTOM_KEYS.items()
             if conf_value(text, key) is not None}
 
@@ -181,7 +204,10 @@ def zones() -> list:
             "kind": kind, "target": target, "uptime_s": proc_uptime(pid),
             "playing": pid in playing if kind != "cast" else None,
             "editable": kind != "cast" and custom_file.exists(),
+            "custom_file": str(custom_file),
             "overrides": read_custom(custom_file) if kind != "cast" else {},
+            "managed_overrides": read_custom(custom_file, "managed") if kind != "cast" else {},
+            "hand_overrides": read_custom(custom_file, "hand") if kind != "cast" else {},
         })
     out.sort(key=lambda z: (z["kind"] == "cast", z["name"].lower()))
     return out
@@ -393,6 +419,84 @@ def adopt_sink(name: str) -> list:
     return change_and_apply(change)
 
 
+ZBEGIN = "// >>> web panel managed >>>"
+ZEND = "// <<< web panel managed <<<"
+
+
+def strip_block(text: str) -> str:
+    lines = text.splitlines()
+    try:
+        b = lines.index(ZBEGIN)
+        e = lines.index(ZEND, b)
+        lines = lines[:b] + lines[e + 1:]
+    except ValueError:
+        pass
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def save_zone(key: str, name: str, offset_ms: str, volume_max_db: str) -> list:
+    """Writes the zone's overrides to the managed block of its -ap2.custom
+    file (an empty value leaves that setting out), then restarts the zone."""
+    zone = next((z for z in zones() if z["key"] == key), None)
+    if not zone:
+        raise ApplyError(f"zone {key} is not running; reload the page")
+    if not zone["editable"]:
+        raise ApplyError(f"{zone['name']} can't be edited here (Cast Bridge zone)")
+
+    settings = {}
+    name = name.strip()
+    if name:
+        if len(name) > 60 or any(ord(c) < 32 for c in name):
+            raise ApplyError("name: up to 60 characters, no control characters")
+        settings["name"] = '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if str(offset_ms).strip():
+        try:
+            ms = int(str(offset_ms).strip())
+        except ValueError:
+            raise ApplyError("latency offset: whole milliseconds, e.g. -120")
+        if not -2000 <= ms <= 2000:
+            raise ApplyError("latency offset: between -2000 and 2000 ms")
+        settings["audio_backend_latency_offset_in_seconds"] = f"{ms / 1000:.3f}"
+    if str(volume_max_db).strip():
+        try:
+            db = float(str(volume_max_db).strip())
+        except ValueError:
+            raise ApplyError("max volume: dB, e.g. -6")
+        if not -96 <= db <= 0:
+            raise ApplyError("max volume: between -96 and 0 dB")
+        settings["volume_max_db"] = f"{db:.1f}"
+
+    path = Path(zone["custom_file"])
+    try:
+        old = path.read_text()
+    except OSError as e:
+        raise ApplyError(f"cannot read {path}: {e}")
+    rest = strip_block(old)
+    hand = [k for k in settings if conf_value(rest, k) is not None]
+    if hand:
+        raise ApplyError(f"{', '.join(hand)} is already set by hand in {path}; "
+                         "remove it there first (libconfig rejects a setting set twice)")
+    block = [ZBEGIN] + [f"{k} = {v};" for k, v in settings.items()] + [ZEND] if settings else []
+    new = rest.rstrip("\n") + ("\n" if rest.strip() else "") + "\n".join(block) + ("\n" if block else "")
+    if new == old:
+        lines = [f"{path.name} unchanged"]
+    else:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(new)
+        os.replace(tmp, path)
+        lines = [f"wrote {path.name}: " + (", ".join(f"{k} = {v}" for k, v in settings.items())
+                                           or "no overrides")]
+    try:
+        os.kill(zone["pid"], signal.SIGTERM)
+    except OSError as e:
+        raise ApplyError(f"saved, but restarting the zone failed: {e}")
+    lines.append(f"restarting {zone['name']} (stopped pid {zone['pid']}); "
+                 "the zone manager starts it again within a few seconds")
+    if (name and name != zone["name"]) or (not name and "name" in zone["overrides"]):
+        lines.append("the AirPlay name changed, so Music Assistant will see a new player")
+    return lines
+
+
 # -- page -----------------------------------------------------------------
 CSS = """
 body{margin:0;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
@@ -418,12 +522,16 @@ input.nm.changed{border-color:#4a6a96}
 .btn{min-height:44px;padding:0 18px;border-radius:8px;font:600 14px system-ui,sans-serif;cursor:pointer}
 .btn.pri{border:0;background:#3d8bfd;color:#0b1220}.btn.sec{border:1px solid #353b46;background:transparent;color:#e6e8eb;font-weight:500}
 .btn:disabled{opacity:.5;cursor:default}
-pre#result{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
-pre#result.err{color:#f0b26a}
+pre#result,pre#zresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
+pre#result.err,pre#zresult.err{color:#f0b26a}
 .btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
 form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
 form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
 form.create select{min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
+tr.zedit td{background:#161a21}
+form.zform{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}
+form.zform label{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
+form.zform input{min-height:40px;padding:0 10px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif;box-sizing:border-box;width:100%}
 form.create .preview{min-height:44px;display:flex;align-items:center;padding:0 12px;border-radius:8px;background:#0d0f13;font:13px ui-monospace,monospace;color:#c9d1db;overflow-wrap:anywhere}
 """
 
@@ -440,8 +548,8 @@ const refresh = () => { inputs.forEach(i => i.classList.toggle('changed', i.valu
 inputs.forEach(i => i.addEventListener('input', refresh));
 if (discardBtn) discardBtn.addEventListener('click', () => { inputs.forEach(i => i.value = i.defaultValue); refresh(); });
 const allButtons = () => document.querySelectorAll('button.btn');
-async function post(url, body) {
-  const out = document.getElementById('result');
+async function post(url, body, outId = 'result', delay = 3000) {
+  const out = document.getElementById(outId);
   allButtons().forEach(b => b.disabled = true);
   out.hidden = false; out.className = ''; out.textContent = 'Applying...';
   out.scrollIntoView({block: 'nearest'});
@@ -450,7 +558,7 @@ async function post(url, body) {
                                 body: JSON.stringify(body)});
     const j = await r.json();
     out.textContent = (j.lines || []).join('\\n') + (j.error ? '\\n' + j.error : '');
-    if (j.ok) { out.textContent += '\\n\\nReloading in 3 s...'; setTimeout(() => location.reload(), 3000); return; }
+    if (j.ok) { out.textContent += `\\n\\nReloading in ${delay / 1000} s...`; setTimeout(() => location.reload(), delay); return; }
     out.className = 'err';
   } catch (e) { out.className = 'err'; out.textContent = 'Request failed: ' + e; }
   allButtons().forEach(b => b.disabled = false); refresh(); cardChanged();
@@ -459,6 +567,19 @@ if (applyBtn) applyBtn.addEventListener('click', () => {
   const names = {}; changed().forEach(i => names[i.dataset.index] = i.value.trim());
   post('api/apply', {names});
 });
+document.querySelectorAll('button.zedit-btn').forEach(b => b.addEventListener('click', () => {
+  const row = document.getElementById(b.dataset.target); row.hidden = !row.hidden;
+  if (!row.hidden) row.querySelector('input').focus();
+}));
+document.querySelectorAll('button.zcancel').forEach(b => b.addEventListener('click', () => {
+  const row = b.closest('tr'); row.querySelectorAll('input').forEach(i => i.value = i.defaultValue); row.hidden = true;
+}));
+document.querySelectorAll('button.zsave').forEach(b => b.addEventListener('click', () => {
+  const f = b.closest('form');
+  const v = n => f.elements[n].disabled ? '' : f.elements[n].value;
+  post('api/zone', {key: b.dataset.key, name: v('name'), offset_ms: v('offset_ms'),
+                    volume_max_db: v('volume_max_db')}, 'zresult', 8000);
+}));
 document.querySelectorAll('button.adopt').forEach(b => b.addEventListener('click', () =>
   post('api/adopt', {name: b.dataset.name})));
 const cardSel = document.getElementById('cc_card'), pairSel = document.getElementById('cc_pair'),
@@ -543,13 +664,38 @@ def render(st: dict) -> str:
         if "name" in ov:
             extras.append("custom name")
         kind = {"sink": "Sound card", "bluetooth": "Bluetooth", "cast": "Cast Bridge"}[z["kind"]]
+        rid = f"ze_{len(zrows)}"
+        edit_btn = (f'<button class="btn sec sm zedit-btn" data-target="{rid}">Edit</button>'
+                    if z["editable"] else "")
         zrows.append(f'<tr><td style="font-weight:600;color:#e6e8eb">{e(z["name"])}</td>'
                      f'<td>{e(kind)}</td><td class="sys"><span class="mono">{e(z["target"])}</span></td>'
                      f'<td>{e(z["port"] or "?")}</td><td>{e(", ".join(extras) or "—")}</td>'
-                     f'<td>{e(status)} · up {e(ago(z["uptime_s"]))}</td></tr>')
+                     f'<td>{e(status)} · up {e(ago(z["uptime_s"]))}{edit_btn}</td></tr>')
+        if z["editable"]:
+            mo, ho = z["managed_overrides"], z["hand_overrides"]
+
+            def field(fid, fname, label, short, value, mode=""):
+                if short in ho:
+                    return (f'<label for="{fid}">{label}</label><input id="{fid}" name="{fname}" disabled '
+                            f'value="" placeholder="set by hand: {e(ho[short])}" title="Set by hand in the zone\'s .custom file; edit or remove it there">')
+                return (f'<label for="{fid}">{label}</label><input id="{fid}" name="{fname}"{mode} '
+                        f'value="{e(value)}" placeholder="{e(z["name"]) if fname == "name" else "0"}">')
+            try:
+                off = str(round(float(mo["offset_s"]) * 1000)) if "offset_s" in mo else ""
+            except ValueError:
+                off = ""
+            zrows.append(
+                f'<tr class="zedit" id="{rid}" hidden><td colspan="6"><form class="zform" onsubmit="return false">'
+                f'<div style="flex:2 1 240px">{field(rid + "_n", "name", "AirPlay name (empty = default)", "name", mo.get("name", ""))}</div>'
+                f'<div style="flex:1 1 140px">{field(rid + "_o", "offset_ms", "Latency offset (ms)", "offset_s", off, " inputmode=numeric")}</div>'
+                f'<div style="flex:1 1 140px">{field(rid + "_v", "volume_max_db", "Max volume (dB)", "volume_max_db", mo.get("volume_max_db", ""), " inputmode=decimal")}</div>'
+                f'<button class="btn pri zsave" type="button" data-key="{e(z["key"])}">Save &amp; restart zone</button>'
+                f'<button class="btn sec zcancel" type="button">Cancel</button></form>'
+                f'<p class="sub" style="margin:10px 0 0;font-size:12px">Changing the name makes Music Assistant see a new player.</p>'
+                f'</td></tr>')
     zones_html = (f'<div class="box"><table><thead><tr><th>Zone</th><th>Type</th><th>Plays to</th>'
                   f'<th>Port</th><th>Overrides</th><th>Status</th></tr></thead>'
-                  f'<tbody>{"".join(zrows)}</tbody></table></div>') if zrows else \
+                  f'<tbody>{"".join(zrows)}</tbody></table></div><pre id="zresult" hidden></pre>') if zrows else \
                  '<p class="sub" style="margin-top:14px">No zones running.</p>'
 
     creatable = [c for c in st["cards"] if c["free"]]
@@ -622,7 +768,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, "Forbidden\n", "text/plain")
             return
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path not in ("/api/apply", "/api/create", "/api/adopt"):
+        if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -638,6 +784,9 @@ class Handler(BaseHTTPRequestHandler):
                 lines = apply_names(names)
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")))
+            elif path == "/api/zone":
+                lines = save_zone(str(body.get("key", "")), str(body.get("name", "")),
+                                  str(body.get("offset_ms", "")), str(body.get("volume_max_db", "")))
             else:
                 lines = adopt_sink(str(body.get("name", "")))
             for l in lines:
