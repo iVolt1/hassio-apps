@@ -471,11 +471,20 @@ def save_zone(key: str, name: str, offset_ms: str, volume_max_db: str) -> list:
         old = path.read_text()
     except OSError as e:
         raise ApplyError(f"cannot read {path}: {e}")
-    rest = strip_block(old)
-    hand = [k for k in settings if conf_value(rest, k) is not None]
-    if hand:
-        raise ApplyError(f"{', '.join(hand)} is already set by hand in {path}; "
-                         "remove it there first (libconfig rejects a setting set twice)")
+    # The form shows every setting it manages with its value in effect, so a
+    # line for one of them set by hand outside the block is taken over: it is
+    # commented out (kept for reference) and the value lives in the block.
+    # libconfig rejects a setting that is set twice.
+    moved, kept = [], []
+    for line in strip_block(old).splitlines():
+        key = next((k for k in CUSTOM_KEYS
+                    if re.match(r"\s*" + re.escape(k) + r"\s*=", line)), None)
+        if key:
+            moved.append(key)
+            kept.append(f"// moved to the web panel block: {line.strip()}")
+        else:
+            kept.append(line)
+    rest = "\n".join(kept) + ("\n" if kept else "")
     block = [ZBEGIN] + [f"{k} = {v};" for k, v in settings.items()] + [ZEND] if settings else []
     new = rest.rstrip("\n") + ("\n" if rest.strip() else "") + "\n".join(block) + ("\n" if block else "")
     if new == old:
@@ -486,6 +495,8 @@ def save_zone(key: str, name: str, offset_ms: str, volume_max_db: str) -> list:
         os.replace(tmp, path)
         lines = [f"wrote {path.name}: " + (", ".join(f"{k} = {v}" for k, v in settings.items())
                                            or "no overrides")]
+        if moved:
+            lines.append(f"took over {', '.join(moved)} set by hand (that line is now commented out)")
     try:
         os.kill(zone["pid"], signal.SIGTERM)
     except OSError as e:
@@ -672,12 +683,9 @@ def render(st: dict) -> str:
                      f'<td>{e(z["port"] or "?")}</td><td>{e(", ".join(extras) or "—")}</td>'
                      f'<td>{e(status)} · up {e(ago(z["uptime_s"]))}{edit_btn}</td></tr>')
         if z["editable"]:
-            mo, ho = z["managed_overrides"], z["hand_overrides"]
+            mo = z["overrides"]   # the values in effect, set here or by hand
 
             def field(fid, fname, label, short, value, mode=""):
-                if short in ho:
-                    return (f'<label for="{fid}">{label}</label><input id="{fid}" name="{fname}" disabled '
-                            f'value="" placeholder="set by hand: {e(ho[short])}" title="Set by hand in the zone\'s .custom file; edit or remove it there">')
                 return (f'<label for="{fid}">{label}</label><input id="{fid}" name="{fname}"{mode} '
                         f'value="{e(value)}" placeholder="{e(z["name"]) if fname == "name" else "0"}">')
             try:
