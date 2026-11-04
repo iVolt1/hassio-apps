@@ -2,7 +2,8 @@
 """
 web_panel.py -- the add-on's web panel, shown in Home Assistant's sidebar
 through Ingress: sound cards, remap sinks (with their system names) and
-whether each zone is running. Managed sinks can be renamed.
+whether each zone is running. Managed sinks can be renamed, new ones
+created on a free pair, and unmanaged ones adopted.
 
   GET  /            the page
   GET  /api/state   the same data as JSON
@@ -10,6 +11,10 @@ whether each zone is running. Managed sinks can be renamed.
                     remap_sinks option through the Supervisor (so the
                     Configuration tab matches), then runs remap_sinks.py --load
                     and returns its log lines
+  POST /api/create  {"master": ..., "channels": ...}: adds a sink on a free
+                    pair, named with its system name, then the same as apply
+  POST /api/adopt   {"name": ...}: adds an unmanaged sink to the options
+                    under its current name, then the same as apply
 
 Python standard library only. Runs in the host network namespace even when
 ap2_ip is set, so Ingress can reach it; it only talks to PulseAudio through
@@ -137,6 +142,18 @@ def state() -> dict:
                 "pair": c["pair"], "channels": PAIR_LABEL.get(c["pair"], c["pair"]),
                 "managed": True, "index": c["index"], "loaded": False, "zone_running": False,
             })
+            if c["pair"] in PAIR_NEEDS:
+                used.setdefault(c["master"], set()).update(PAIR_NEEDS[c["pair"]])
+
+    card_names = {s["name"] for s in sinks if "alsa" in s.get("driver", "") and "name" in s}
+    for r in remaps:
+        if r["managed"]:
+            continue
+        if not r["pair"]:
+            r["adopt_note"] = f"channels {r['channels']} can't be set in the options"
+        elif r["master"] not in card_names:
+            r["adopt_note"] = "its master is not a sound card"
+        r["adoptable"] = "adopt_note" not in r
 
     # Option order, then unmanaged sinks, so a renamed sink stays in place.
     remaps.sort(key=lambda r: (r["index"] is None, r["index"] or 0, r["name"] or ""))
@@ -155,6 +172,7 @@ def state() -> dict:
             "used": [p for p in pairs if (PAIR_NEEDS.get(p) or chans) & taken],
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
+        cards[-1]["free_names"] = {p: rs.system_name(s["name"], p, descs) for p in cards[-1]["free"]}
     return {"cards": cards, "remap_sinks": remaps}
 
 
@@ -192,31 +210,18 @@ def save_options(options: dict) -> None:
     os.replace(tmp, OPTIONS_FILE)
 
 
-def apply_names(names: dict) -> list:
-    """Renames option entries ({index: new name}), saves, applies. Returns
-    the log lines to show."""
+def change_and_apply(change) -> list:
+    """Reads the options, lets change(entries, descs) edit the remap_sinks
+    list in place and return what it did, then saves and applies. Returns the
+    log lines to show."""
     try:
         options = json.loads(OPTIONS_FILE.read_text())
     except (OSError, ValueError) as e:
         raise ApplyError(f"cannot read {OPTIONS_FILE}: {e}")
-    entries = options.get("remap_sinks") or []
+    entries = options.setdefault("remap_sinks", [])
     descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
 
-    lines = []
-    for key, new in names.items():
-        try:
-            i = int(key)
-            entry = entries[i]
-        except (ValueError, IndexError, TypeError):
-            raise ApplyError(f"no remap_sinks entry #{key}; reload the page")
-        new = str(new).strip()
-        if not rs.NAME_RE.match(new):
-            raise ApplyError(f"'{new}': letters, digits, _ . - only")
-        old = entry.get("name") or rs.system_name(entry.get("master", ""),
-                                                   entry.get("channels", ""), descs)
-        if new != old:
-            entry["name"] = new
-            lines.append(f"rename {old} -> {new}")
+    lines = change(entries, descs)
     if not lines:
         return ["nothing changed"]
 
@@ -239,6 +244,67 @@ def apply_names(names: dict) -> list:
     return lines
 
 
+def apply_names(names: dict) -> list:
+    """Renames option entries ({index: new name})."""
+    return change_and_apply(lambda entries, descs: _rename(entries, descs, names))
+
+
+def _rename(entries: list, descs: dict, names: dict) -> list:
+    lines = []
+    for key, new in names.items():
+        try:
+            i = int(key)
+            entry = entries[i]
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError(f"no remap_sinks entry #{key}; reload the page")
+        new = str(new).strip()
+        if not rs.NAME_RE.match(new):
+            raise ApplyError(f"'{new}': letters, digits, _ . - only")
+        old = entry.get("name") or rs.system_name(entry.get("master", ""),
+                                                   entry.get("channels", ""), descs)
+        if new != old:
+            entry["name"] = new
+            lines.append(f"rename {old} -> {new}")
+    return lines
+
+
+def create_sink(master: str, pair: str) -> list:
+    """Adds a sink on a free pair of a card, named with its system name."""
+    card = next((c for c in state()["cards"] if c["name"] == master), None)
+    if not card:
+        raise ApplyError(f"no sound card {master}; reload the page")
+    if pair not in card["free"]:
+        raise ApplyError(f"{PAIR_LABEL.get(pair, pair)} of {card['description']} is not free")
+    name = card["free_names"].get(pair)
+    if not name:
+        raise ApplyError("cannot make a system name for this card; add it in the Configuration tab")
+
+    def change(entries, descs):
+        entries.append({"name": name, "master": master, "channels": pair})
+        return [f"create {name} ({card['description']}, {PAIR_LABEL[pair]})"]
+    return change_and_apply(change)
+
+
+def adopt_sink(name: str) -> list:
+    """Adds an unmanaged sink to the options under its current name, so its
+    zone and Music Assistant player stay the same."""
+    row = next((r for r in state()["remap_sinks"] if r["name"] == name), None)
+    if not row or row["managed"]:
+        raise ApplyError(f"{name} is not an unmanaged sink; reload the page")
+    if not row.get("adoptable"):
+        raise ApplyError(f"{name} can't be adopted: {row.get('adopt_note')}")
+    args = next((a for a in rs.loaded_remap_modules() or [] if rs.sink_name_of(a) == name), "")
+    m = re.search(r"device\.description='([^'\"]*)'", args)
+
+    def change(entries, descs):
+        entry = {"name": name, "master": row["master"], "channels": row["pair"]}
+        if m and m.group(1):
+            entry["description"] = m.group(1)
+        entries.append(entry)
+        return [f"adopt {name} ({row['master_description']}, {row['channels']})"]
+    return change_and_apply(change)
+
+
 # -- page -----------------------------------------------------------------
 CSS = """
 body{margin:0;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
@@ -258,7 +324,7 @@ td.sys{white-space:nowrap}
 td.name{font-family:ui-monospace,monospace;font-size:13px;color:#e6e8eb}
 button.copy{width:32px;height:32px;border:1px solid #353b46;border-radius:6px;background:transparent;color:#b8c0ca;cursor:pointer;vertical-align:middle;margin-left:6px}
 .warn{color:#f0b26a}
-input.nm{width:100%;min-height:40px;padding:0 10px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:13px ui-monospace,monospace;box-sizing:border-box}
+input.nm{width:100%;min-width:340px;min-height:40px;padding:0 10px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:13px ui-monospace,monospace;box-sizing:border-box}
 input.nm.changed{border-color:#4a6a96}
 .bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}
 .btn{min-height:44px;padding:0 18px;border-radius:8px;font:600 14px system-ui,sans-serif;cursor:pointer}
@@ -266,6 +332,11 @@ input.nm.changed{border-color:#4a6a96}
 .btn:disabled{opacity:.5;cursor:default}
 pre#result{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
 pre#result.err{color:#f0b26a}
+.btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
+form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
+form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
+form.create select{min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
+form.create .preview{min-height:44px;display:flex;align-items:center;padding:0 12px;border-radius:8px;background:#0d0f13;font:13px ui-monospace,monospace;color:#c9d1db;overflow-wrap:anywhere}
 """
 
 COPY_ICON = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -280,19 +351,47 @@ const refresh = () => { inputs.forEach(i => i.classList.toggle('changed', i.valu
   const n = changed().length; if (applyBtn) { applyBtn.disabled = !n; discardBtn.disabled = !n; } };
 inputs.forEach(i => i.addEventListener('input', refresh));
 if (discardBtn) discardBtn.addEventListener('click', () => { inputs.forEach(i => i.value = i.defaultValue); refresh(); });
-if (applyBtn) applyBtn.addEventListener('click', async () => {
-  const names = {}; changed().forEach(i => names[i.dataset.index] = i.value.trim());
+const allButtons = () => document.querySelectorAll('button.btn');
+async function post(url, body) {
   const out = document.getElementById('result');
-  applyBtn.disabled = discardBtn.disabled = true; out.hidden = false; out.className = ''; out.textContent = 'Applying...';
+  allButtons().forEach(b => b.disabled = true);
+  out.hidden = false; out.className = ''; out.textContent = 'Applying...';
+  out.scrollIntoView({block: 'nearest'});
   try {
-    const r = await fetch('api/apply', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                        body: JSON.stringify({names})});
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(body)});
     const j = await r.json();
     out.textContent = (j.lines || []).join('\\n') + (j.error ? '\\n' + j.error : '');
-    if (!j.ok) { out.className = 'err'; refresh(); return; }
-    out.textContent += '\\n\\nReloading in 3 s...'; setTimeout(() => location.reload(), 3000);
-  } catch (e) { out.className = 'err'; out.textContent = 'Request failed: ' + e; refresh(); }
+    if (j.ok) { out.textContent += '\\n\\nReloading in 3 s...'; setTimeout(() => location.reload(), 3000); return; }
+    out.className = 'err';
+  } catch (e) { out.className = 'err'; out.textContent = 'Request failed: ' + e; }
+  allButtons().forEach(b => b.disabled = false); refresh(); cardChanged();
+}
+if (applyBtn) applyBtn.addEventListener('click', () => {
+  const names = {}; changed().forEach(i => names[i.dataset.index] = i.value.trim());
+  post('api/apply', {names});
 });
+document.querySelectorAll('button.adopt').forEach(b => b.addEventListener('click', () =>
+  post('api/adopt', {name: b.dataset.name})));
+const cardSel = document.getElementById('cc_card'), pairSel = document.getElementById('cc_pair'),
+      preview = document.getElementById('cc_preview'), createBtn = document.getElementById('create');
+function cardChanged() {
+  if (!cardSel) return;
+  const free = JSON.parse(cardSel.selectedOptions[0].dataset.free);
+  const keep = pairSel.value;
+  pairSel.innerHTML = '';
+  Object.entries(free).forEach(([p, v]) => { const o = new Option(v.label, p); o.dataset.name = v.name || ''; pairSel.add(o); });
+  if ([...pairSel.options].some(o => o.value === keep)) pairSel.value = keep;
+  pairChanged();
+}
+function pairChanged() {
+  const o = pairSel.selectedOptions[0];
+  preview.textContent = o ? (o.dataset.name || '(no system name)') : '';
+  createBtn.disabled = !o || !o.dataset.name;
+}
+if (cardSel) { cardSel.addEventListener('change', cardChanged); pairSel.addEventListener('change', pairChanged);
+  createBtn.addEventListener('click', () => post('api/create', {master: cardSel.value, channels: pairSel.value}));
+  cardChanged(); }
 refresh();
 document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click', () => {
   const t = b.dataset.text;
@@ -322,6 +421,10 @@ def render(st: dict) -> str:
         else:
             st_txt = ("Zone running" if r["zone_running"] else "No zone running") + \
                      ("" if r["managed"] else " · unmanaged")
+            if not r["managed"]:
+                st_txt += (f'<button class="btn sec sm adopt" data-name="{e(r["name"])}">Adopt</button>'
+                           if r.get("adoptable") else
+                           f'<br><span class="sub" style="font-size:12px">Can\'t adopt: {e(r.get("adopt_note", ""))}</span>')
         if r["index"] is not None:
             name_cell = (f'<td><input class="nm" data-index="{r["index"]}" value="{e(r["name"])}" '
                          f'aria-label="Sink name for {e(r["system_name"] or r["name"])}"></td>')
@@ -330,6 +433,20 @@ def render(st: dict) -> str:
         rows.append(f'<tr>{name_cell}<td class="sys">{sysn}</td>'
                     f'<td>{e(r["master_description"] or r["master"])}</td>'
                     f'<td>{e(r["channels"])}</td><td>{st_txt}</td></tr>')
+
+    creatable = [c for c in st["cards"] if c["free"]]
+    if creatable:
+        opts = "".join(
+            f'<option value="{e(c["name"])}" data-free="'
+            + e(json.dumps({p: {"label": PAIR_LABEL[p], "name": c["free_names"].get(p)} for p in c["free"]}))
+            + f'">{e(c["description"] or c["name"])}</option>' for c in creatable)
+        create_form = f"""<form class="create" onsubmit="return false">
+<div style="flex:1 1 260px"><label for="cc_card">Card</label><select id="cc_card" style="width:100%">{opts}</select></div>
+<div style="flex:1 1 180px"><label for="cc_pair">Channels (free pairs only)</label><select id="cc_pair" style="width:100%"></select></div>
+<div style="flex:2 1 320px"><span class="lbl">Will be created as</span><span class="preview" id="cc_preview"></span></div>
+<button class="btn pri" id="create" type="button">Create sink</button></form>"""
+    else:
+        create_form = '<p class="sub" style="margin-top:14px">No free channel pairs left on any sound card.</p>'
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -344,7 +461,7 @@ def render(st: dict) -> str:
 <div class="bar"><p class="sub" style="margin:0">Renaming a sink renames its zone, so Music Assistant sees it as a new player.</p>
 <div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>
 <button class="btn pri" id="apply" disabled>Apply</button></div></div>
-<pre id="result" hidden></pre></section>
+<pre id="result" hidden></pre>{create_form}</section>
 </main><script>{SCRIPT}</script></body></html>"""
 
 
@@ -385,16 +502,25 @@ class Handler(BaseHTTPRequestHandler):
             log.warning("refused POST %s from %s", self.path, ip)
             self._send(403, "Forbidden\n", "text/plain")
             return
-        if self.path.split("?", 1)[0].rstrip("/") != "/api/apply":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path not in ("/api/apply", "/api/create", "/api/adopt"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            names = json.loads(self.rfile.read(min(length, 65536)) or b"{}").get("names") or {}
-            if not isinstance(names, dict):
+            body = json.loads(self.rfile.read(min(length, 65536)) or b"{}")
+            if not isinstance(body, dict):
                 raise ApplyError("bad request")
-            log.info("apply requested: %s", names)
-            lines = apply_names(names)
+            log.info("%s requested: %s", path, body)
+            if path == "/api/apply":
+                names = body.get("names") or {}
+                if not isinstance(names, dict):
+                    raise ApplyError("bad request")
+                lines = apply_names(names)
+            elif path == "/api/create":
+                lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")))
+            else:
+                lines = adopt_sink(str(body.get("name", "")))
             for l in lines:
                 log.info("apply: %s", l)
             result = {"ok": True, "lines": lines}
