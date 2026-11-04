@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 web_panel.py -- the add-on's web panel, shown in Home Assistant's sidebar
-through Ingress: sound cards, remap sinks (with their system names) and
-whether each zone is running. Managed sinks can be renamed, new ones
+through Ingress: the running AirPlay 2 zones, sound cards, remap sinks
+(with their system names) and whether each zone is running. Managed sinks can be renamed, new ones
 created on a free pair, and unmanaged ones adopted.
 
   GET  /            the page
@@ -99,6 +99,94 @@ def running_zones() -> set:
     return names
 
 
+CUSTOM_KEYS = {"name": "name", "audio_backend_latency_offset_in_seconds": "offset_s",
+               "volume_max_db": "volume_max_db"}
+
+
+def shairport_procs() -> list:
+    """[(pid, argv)] for every running shairport-sync."""
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        argv = [a.decode(errors="replace") for a in argv if a]
+        if argv and os.path.basename(argv[0]) == "shairport-sync":
+            out.append((int(pid), argv))
+    return out
+
+
+def proc_uptime(pid: int):
+    """Seconds since the process started, or None."""
+    try:
+        start_ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        uptime = float(Path("/proc/uptime").read_text().split()[0])
+        return max(0, int(uptime - start_ticks / os.sysconf("SC_CLK_TCK")))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def streaming_pids() -> set:
+    """PIDs that have a PulseAudio stream open (i.e. are playing)."""
+    try:
+        res = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {int(m) for m in re.findall(r'application\.process\.id = "(\d+)"', res.stdout)}
+
+
+def conf_value(text: str, key: str):
+    m = re.search(r'^\s*' + re.escape(key) + r'\s*=\s*"?([^";]*)"?\s*;', text, re.M)
+    return m.group(1).strip() if m else None
+
+
+def read_custom(path: Path) -> dict:
+    """The overrides this panel knows about, from a zone's -ap2.custom file
+    (uncommented lines only)."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    return {short: conf_value(text, key) for key, short in CUSTOM_KEYS.items()
+            if conf_value(text, key) is not None}
+
+
+def zones() -> list:
+    """Every running shairport-sync, with what it plays to."""
+    playing = streaming_pids()
+    out = []
+    for pid, argv in shairport_procs():
+        opt = {argv[i]: argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("-a", "-p", "-c")}
+        conf = Path(opt.get("-c", ""))
+        try:
+            text = conf.read_text()
+        except OSError:
+            text = ""
+        key = conf.name[:-len("-ap2.conf")] if conf.name.endswith("-ap2.conf") else conf.name
+        backend = conf_value(text, "output_backend") or "?"
+        sink = conf_value(text.split("pulseaudio :", 1)[1], "sink") if "pulseaudio :" in text else None
+        if backend == "pipe":
+            kind, target = "cast", "Cast Bridge"
+        elif sink and sink.startswith("bluez_"):
+            kind, target = "bluetooth", sink
+        else:
+            kind, target = "sink", sink or "?"
+        custom_file = conf.with_name(f"{key}-ap2.custom")
+        out.append({
+            "key": key, "name": opt.get("-a", key), "port": opt.get("-p"), "pid": pid,
+            "kind": kind, "target": target, "uptime_s": proc_uptime(pid),
+            "playing": pid in playing if kind != "cast" else None,
+            "editable": kind != "cast" and custom_file.exists(),
+            "overrides": read_custom(custom_file) if kind != "cast" else {},
+        })
+    out.sort(key=lambda z: (z["kind"] == "cast", z["name"].lower()))
+    return out
+
+
 def state() -> dict:
     sinks = list_sinks()
     descs = {s["name"]: s.get("description", "") for s in sinks if "name" in s}
@@ -173,7 +261,7 @@ def state() -> dict:
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
         cards[-1]["free_names"] = {p: rs.system_name(s["name"], p, descs) for p in cards[-1]["free"]}
-    return {"cards": cards, "remap_sinks": remaps}
+    return {"zones": zones(), "cards": cards, "remap_sinks": remaps}
 
 
 # -- apply ----------------------------------------------------------------
@@ -434,6 +522,36 @@ def render(st: dict) -> str:
                     f'<td>{e(r["master_description"] or r["master"])}</td>'
                     f'<td>{e(r["channels"])}</td><td>{st_txt}</td></tr>')
 
+    def ago(s):
+        if s is None:
+            return "?"
+        return f"{s // 86400}d {s % 86400 // 3600}h" if s >= 86400 else \
+               f"{s // 3600}h {s % 3600 // 60}m" if s >= 3600 else f"{s // 60}m {s % 60}s"
+
+    zrows = []
+    for z in st["zones"]:
+        status = ("Playing" if z["playing"] else "Idle") if z["playing"] is not None else "Running"
+        ov = z["overrides"]
+        extras = []
+        if "offset_s" in ov:
+            try:
+                extras.append(f'offset {round(float(ov["offset_s"]) * 1000):+d} ms')
+            except ValueError:
+                extras.append(f'offset {ov["offset_s"]} s')
+        if "volume_max_db" in ov:
+            extras.append(f'max {ov["volume_max_db"]} dB')
+        if "name" in ov:
+            extras.append("custom name")
+        kind = {"sink": "Sound card", "bluetooth": "Bluetooth", "cast": "Cast Bridge"}[z["kind"]]
+        zrows.append(f'<tr><td style="font-weight:600;color:#e6e8eb">{e(z["name"])}</td>'
+                     f'<td>{e(kind)}</td><td class="sys"><span class="mono">{e(z["target"])}</span></td>'
+                     f'<td>{e(z["port"] or "?")}</td><td>{e(", ".join(extras) or "—")}</td>'
+                     f'<td>{e(status)} · up {e(ago(z["uptime_s"]))}</td></tr>')
+    zones_html = (f'<div class="box"><table><thead><tr><th>Zone</th><th>Type</th><th>Plays to</th>'
+                  f'<th>Port</th><th>Overrides</th><th>Status</th></tr></thead>'
+                  f'<tbody>{"".join(zrows)}</tbody></table></div>') if zrows else \
+                 '<p class="sub" style="margin-top:14px">No zones running.</p>'
+
     creatable = [c for c in st["cards"] if c["free"]]
     if creatable:
         opts = "".join(
@@ -453,7 +571,8 @@ def render(st: dict) -> str:
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
-<section><h1>Sound cards</h1><p class="sub">Free pairs can become new zones.</p>
+<section><h1>Zones</h1><p class="sub">Every running AirPlay 2 receiver.</p>{zones_html}</section>
+<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div></section>
 <section><h2>Remap sinks</h2><p class="sub">Rename a managed sink and Apply. The system name stays as a reference.</p>
 <div class="box"><table><thead><tr><th>Sink name</th><th>System name</th><th>Card</th>
