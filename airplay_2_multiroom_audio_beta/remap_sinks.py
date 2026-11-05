@@ -28,7 +28,10 @@ custom.pa). Sinks made by anything else are left alone. It:
     ones whose entry changed, and unloads ones it loaded earlier whose entry
     was removed
 
-Usage: remap_sinks.py [--load] [--dry-run]
+Usage: remap_sinks.py [--load] [--dry-run] [--reload-combine NAME[,NAME...]]
+  --reload-combine: reload those combine sinks even if unchanged (the zone
+  manager uses it when a member that had gone away, such as a Bluetooth
+  speaker, is back: PulseAudio doesn't re-add it to the combine sink)
 """
 
 import difflib
@@ -559,7 +562,7 @@ def load_json(path: Path) -> dict:
         return {}
 
 
-def apply_combines(combos: list, changed: set) -> None:
+def apply_combines(combos: list, changed: set, forced: set = frozenset()) -> None:
     """Loads each configured combine sink whose members all exist, reloads
     one whose entry changed or one of whose members was just (re)loaded
     (PulseAudio drops a member that goes away and doesn't take it back),
@@ -596,14 +599,15 @@ def apply_combines(combos: list, changed: set) -> None:
                 log(f"unloaded combine sink {name} until its members are back")
             continue
         touched = [m for m in members if m in changed]
-        if cur and same(cur[1], args) and not touched:
+        back = name in forced and not touched
+        if cur and same(cur[1], args) and not touched and not back:
             log(f"combine sink {name} already loaded")
             cstate[name] = args
             continue
         if cur:
-            log(f"combine sink {name}: " + (f"member(s) {', '.join(touched)} reloaded"
-                                             if same(cur[1], args) else "differs from its option")
-                + "; reloading")
+            why = ("differs from its option" if not same(cur[1], args) else
+                   f"member(s) {', '.join(touched)} reloaded" if touched else "a member is back")
+            log(f"combine sink {name}: {why}; reloading")
             if not unload_idx(name, cur[0]):
                 continue
         ok, out = pactl("load-module", "module-combine-sink", args)
@@ -647,7 +651,12 @@ def main() -> int:
 
     if load and not dry_run:
         changed = apply(loadable, loaded, configured)
-        apply_combines(combos, changed)
+        forced = set()
+        argv = sys.argv[1:]
+        for i, a in enumerate(argv):
+            if a == "--reload-combine" and i + 1 < len(argv):
+                forced |= {n.strip() for n in argv[i + 1].split(",") if n.strip()}
+        apply_combines(combos, changed, forced)
 
     if new == old:
         log(f"{CUSTOM_PA} unchanged")

@@ -6,6 +6,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: **Combine sinks** section — a list of combine sinks with their members and
+  whether their zone is running (Remove, or Adopt for one made elsewhere), and a form to
+  create one: name, description, and checkboxes for any number of sinks, grouped as zones
+  (remap sinks), sound card outputs and Bluetooth. It warns when a card's whole output and
+  a zone on that same card are both picked (those speakers would play everything twice).
+- Combine sinks come back by themselves when a missing member appears again, e.g. a
+  Bluetooth speaker that was off: the zone manager (re)loads the combine sink, since
+  PulseAudio drops a member that goes away and doesn't take it back.
+  `remap_sinks.py --reload-combine NAME` forces that reload.
 - Combine sinks: a `combine_sinks` option (name, comma-separated member `sinks`,
   optional description) loads PulseAudio `module-combine-sink` sinks after the remap
   sinks, and each gets its own AirPlay 2 zone — one AirPlay target that plays in several
