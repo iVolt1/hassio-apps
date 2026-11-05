@@ -22,7 +22,8 @@ custom.pa). Sinks made by anything else are left alone. It:
     already used by another sink on the same master, configured or not
   * with --load, first sets each card in the card_profiles option to its
     profile (a card's master sink only exists under the right profile), then
-    makes PulseAudio match the options, using the same lines
+    makes PulseAudio match the options (remap sinks, then the combine_sinks
+    built on them), using the same lines
     that go into custom.pa: loads configured sinks that are missing, reloads
     ones whose entry changed, and unloads ones it loaded earlier whose entry
     was removed
@@ -44,8 +45,13 @@ CUSTOM_PA = Path(os.environ.get("RS_CUSTOM_PA", "/config/custom.pa"))
 STATE_FILE = Path(os.environ.get("RS_STATE_FILE",
                                  str(CUSTOM_PA.with_name("remap_sinks_state.json"))))
 
+COMBINE_STATE_FILE = Path(os.environ.get(
+    "RS_COMBINE_STATE_FILE", str(CUSTOM_PA.with_name("combine_sinks_state.json"))))
+
 # sink_name -> module index, filled by loaded_remap_modules()
 MODULE_IDX = {}
+# combine sink_name -> (module index, argument string), filled likewise
+COMBINE_MODS = {}
 
 BEGIN = "# >>> airplay2_multiroom_audio managed >>>"
 END = "# <<< airplay2_multiroom_audio managed <<<"
@@ -279,18 +285,24 @@ def loaded_remap_modules():
     if res.returncode != 0:
         log(f"pactl list modules exited {res.returncode}; not listing unmanaged sinks")
         return None
-    out, is_remap, idx = [], False, None
+    out, kind, idx = [], None, None
     MODULE_IDX.clear()
+    COMBINE_MODS.clear()
     for line in res.stdout.splitlines():
         if line.startswith("Module #"):
-            is_remap, idx = False, line[len("Module #"):].strip()
+            kind, idx = None, line[len("Module #"):].strip()
         elif re.match(r"\s*Name:\s*module-remap-sink\s*$", line):
-            is_remap = True
-        elif is_remap and re.match(r"\s*Argument:", line):
+            kind = "remap"
+        elif re.match(r"\s*Name:\s*module-combine-sink\s*$", line):
+            kind = "combine"
+        elif kind and re.match(r"\s*Argument:", line):
             args = line.split(":", 1)[1].strip()
-            out.append(args)
-            MODULE_IDX[sink_name_of(args)] = idx
-            is_remap = False
+            if kind == "remap":
+                out.append(args)
+                MODULE_IDX[sink_name_of(args)] = idx
+            else:
+                COMBINE_MODS[sink_name_of(args) or f"combined#{idx}"] = (idx, args)
+            kind = None
     return out
 
 
@@ -448,9 +460,10 @@ def apply(loadable: list, loaded, configured: set) -> None:
     sink changes (stops removed zones, starts new ones)."""
     if loaded is None:
         log("pactl not available; not loading or unloading any sinks")
-        return
+        return set()
     current = {sink_name_of(a): a for a in loaded}
     state = load_state()
+    changed = set()   # remap sinks (re)loaded now; combine sinks using them reload
 
     # Entries removed from the options first, so a renamed sink's old copy is
     # gone before the new one loads. Usable-but-skipped entries are still
@@ -470,12 +483,14 @@ def apply(loadable: list, loaded, configured: set) -> None:
         if name not in current:
             if load(name, args):
                 state[name] = args
+                changed.add(name)
         elif same(current[name], args):
             log(f"{name} already loaded")
             state[name] = args
         else:
             log(f"{name} differs from its option; reloading")
             if unload(name):
+                changed.add(name)
                 if load(name, args):
                     state[name] = args
                 else:
@@ -483,6 +498,125 @@ def apply(loadable: list, loaded, configured: set) -> None:
                     load(name, current[name])
 
     save_state(state)
+    return changed
+
+
+# -- combine sinks --------------------------------------------------------
+def combine_configs(remap_names: set) -> list:
+    """[(name, args, members)] for the usable combine_sinks entries (members
+    is a comma-separated list of sink names, at least two)."""
+    try:
+        opts = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    entries = opts.get("combine_sinks") or []
+    out = []
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("name", "")).strip()
+        members = [m.strip() for m in str(e.get("sinks", "")).split(",") if m.strip()]
+        desc = str(e.get("description", "") or "").strip()
+        if not NAME_RE.match(name):
+            log(f"combine sink: skipping invalid name {name!r} (letters, digits, _ . - only)")
+            continue
+        if name in remap_names or any(n == name for n, _, _ in out):
+            log(f"combine sink: skipping {name}: the name is already used by another sink")
+            continue
+        bad = [m for m in members if not NAME_RE.match(m)]
+        if bad or len(set(members)) < 2:
+            log(f"combine sink: skipping {name}: sinks needs at least two different sink "
+                f"names, comma-separated (got {e.get('sinks')!r})")
+            continue
+        args = f"sink_name={name} slaves={','.join(members)}"
+        if desc:
+            if '"' in desc or "'" in desc:
+                log(f"combine sink {name}: quotes are not allowed in description, ignoring it")
+            else:
+                args += f" sink_properties=\"device.description='{desc}'\""
+        out.append((name, args, members))
+    return out
+
+
+def combine_block(combos: list) -> list:
+    """custom.pa lines for the combine sinks (after the remap sinks they
+    use), plus unmanaged combine sinks as comments."""
+    lines = [f"load-module module-combine-sink {a}" for _, a, _ in combos]
+    names = {n for n, _, _ in combos}
+    mine = load_json(COMBINE_STATE_FILE)
+    other = [a for n, (_, a) in COMBINE_MODS.items() if n not in names and n not in mine]
+    if other:
+        lines += ["#", "# Combine sinks loaded now but not in the add-on options (left alone):"]
+        lines += [f"# load-module module-combine-sink {a}" for a in other]
+    return lines
+
+
+def load_json(path: Path) -> dict:
+    try:
+        d = json.loads(path.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def apply_combines(combos: list, changed: set) -> None:
+    """Loads each configured combine sink whose members all exist, reloads
+    one whose entry changed or one of whose members was just (re)loaded
+    (PulseAudio drops a member that goes away and doesn't take it back),
+    and unloads combine sinks this add-on loaded whose entry was removed."""
+    if loaded_remap_modules() is None:   # refresh COMBINE_MODS after the remap changes
+        return
+    sinks_now = set(sink_descriptions())
+    cstate = load_json(COMBINE_STATE_FILE)
+    names = {n for n, _, _ in combos}
+
+    def unload_idx(name, idx):
+        ok, out = pactl("unload-module", idx)
+        if not ok:
+            log(f"unloading combine sink {name} failed: {out}")
+        return ok
+
+    for name in [n for n in cstate if n not in names]:
+        cur = COMBINE_MODS.get(name)
+        if cur and same(cur[1], cstate[name]):
+            if unload_idx(name, cur[0]):
+                log(f"unloaded combine sink {name} (removed from the options)")
+        elif cur:
+            log(f"combine sink {name} was removed from the options but is loaded with "
+                "arguments this add-on did not set; leaving it")
+        del cstate[name]
+
+    for name, args, members in combos:
+        cur = COMBINE_MODS.get(name)
+        missing = [m for m in members if m not in sinks_now]
+        if missing:
+            log(f"NOT loading combine sink {name}: member sink(s) {', '.join(missing)} "
+                "don't exist now")
+            if cur and name in cstate and same(cur[1], cstate[name]) and unload_idx(name, cur[0]):
+                log(f"unloaded combine sink {name} until its members are back")
+            continue
+        touched = [m for m in members if m in changed]
+        if cur and same(cur[1], args) and not touched:
+            log(f"combine sink {name} already loaded")
+            cstate[name] = args
+            continue
+        if cur:
+            log(f"combine sink {name}: " + (f"member(s) {', '.join(touched)} reloaded"
+                                             if same(cur[1], args) else "differs from its option")
+                + "; reloading")
+            if not unload_idx(name, cur[0]):
+                continue
+        ok, out = pactl("load-module", "module-combine-sink", args)
+        if ok:
+            log(f"loaded combine sink {name} (module #{out}): {', '.join(members)}")
+            cstate[name] = args
+        else:
+            log(f"loading combine sink {name} failed: {out}")
+
+    COMBINE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = COMBINE_STATE_FILE.with_name(COMBINE_STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(cstate, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, COMBINE_STATE_FILE)
 
 
 def splice(old: str, block: list) -> str:
@@ -507,10 +641,13 @@ def main() -> int:
         apply_card_profiles()
     old = CUSTOM_PA.read_text() if CUSTOM_PA.exists() else ""
     block, loadable, loaded, configured = build_block(load_options(), old)
+    combos = combine_configs(configured)
+    block = block[:-1] + combine_block(combos) + block[-1:]
     new = splice(old, block)
 
     if load and not dry_run:
-        apply(loadable, loaded, configured)
+        changed = apply(loadable, loaded, configured)
+        apply_combines(combos, changed)
 
     if new == old:
         log(f"{CUSTOM_PA} unchanged")

@@ -185,7 +185,8 @@ def assign_rtsp_port(name: str) -> int:
 
 # -- PulseAudio ---------------------------------------------------------
 def list_remap_sinks():
-    """Names of the module-remap-sink sinks that should have a zone, in
+    """Names of the module-remap-sink and module-combine-sink sinks (the
+    add-on's combine_sinks) that should have a zone, in
     pactl's order, or None if pactl could not be queried (callers must
     NOT treat None as "no sinks", or a PulseAudio hiccup would tear every
     zone down)."""
@@ -202,7 +203,8 @@ def list_remap_sinks():
     names = []
     for line in res.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 3 and "module-remap-sink" in parts[2]:
+        if len(parts) >= 3 and ("module-remap-sink" in parts[2]
+                                or "module-combine-sink" in parts[2]):
             names.append(parts[1])
     return names
 
@@ -548,6 +550,16 @@ class Manager:
                     self.zones.pop(s).stop()
                 self.stop_event.wait(2)   # let PulseAudio finish loading its cards
                 bounce_and_recreate_remaps(desired)
+                # Combine sinks (and remap sinks this add-on manages but the
+                # recreate above didn't see) come back from the options.
+                try:
+                    r = subprocess.run(["python3", "-I", "/usr/sbin/remap_sinks.py", "--load"],
+                                       capture_output=True, text=True, timeout=120)
+                    for line in r.stdout.splitlines():
+                        if "loaded" in line or "NOT" in line or "failed" in line:
+                            log.info("%s", line)
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    log.warning("remap_sinks.py --load after the PulseAudio restart failed: %s", e)
                 names = list_remap_sinks() or names
                 desired = self._desired(names)
                 add = [s for s in desired if s not in self.zones]

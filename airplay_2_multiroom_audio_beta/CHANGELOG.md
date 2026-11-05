@@ -6,6 +6,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Combine sinks: a `combine_sinks` option (name, comma-separated member `sinks`,
+  optional description) loads PulseAudio `module-combine-sink` sinks after the remap
+  sinks, and each gets its own AirPlay 2 zone — one AirPlay target that plays in several
+  rooms, handy for senders that can't group zones. A combine sink is reloaded when one of
+  its members is reloaded (PulseAudio drops a member that goes away), isn't loaded while a
+  member is missing, and is unloaded when removed from the options (only ones this add-on
+  loaded). After `ha audio restart` the zone manager reloads them too.
 - Custom channel pairs: `remap_sinks` entries can use `channels: custom` with `left` and
   `right` set to any two channels of the card (e.g. `front-center` + `side-left`; the same
   channel twice makes a mono zone). System names use the channel abbreviations
