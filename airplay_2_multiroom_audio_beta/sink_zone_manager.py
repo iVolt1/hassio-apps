@@ -368,6 +368,11 @@ def zone_sinks(names):
 
 
 # -- one zone -----------------------------------------------------------
+# log file -> zone key, for every zone that has started, so renaming one
+# zone never removes or shares another zone's log
+LOG_OWNERS = {}
+
+
 class Zone:
     def __init__(self, sink: str, rtsp_port: int, udp_base: int,
                  pa_sink: str = None, display_name: str = None):
@@ -382,6 +387,8 @@ class Zone:
         self.udp_base = udp_base
         self.config_file = CONFIG_DIR / f"{sink}-ap2.conf"
         self.custom_file = CONFIG_DIR / f"{sink}-ap2.custom"
+        # Named after the zone's AirPlay name (set in start(), once any custom
+        # name is known), so the logs folder reads like the zone list.
         self.log_file = LOG_DIR / f"{sink}-ap2.log"
         self.proc = None
         self.started_at = 0.0
@@ -459,6 +466,25 @@ pulseaudio :
         self._ensure_custom_file()
         self._write_config()
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", self.display_name).strip("_") or self.sink
+        log_file = LOG_DIR / f"{stem}-ap2.log"
+        if LOG_OWNERS.get(log_file, self.sink) != self.sink:   # same AirPlay name twice
+            log_file = LOG_DIR / f"{stem}__{self.sink}-ap2.log"
+        if log_file != self.log_file or LOG_OWNERS.get(log_file) != self.sink:
+            # First start, or the zone was renamed: drop its log under the
+            # old name, and the one under its sink name from older versions,
+            # unless another zone uses that file now.
+            for old in {self.log_file, LOG_DIR / f"{self.sink}-ap2.log"} - {log_file}:
+                if LOG_OWNERS.get(old, self.sink) == self.sink:
+                    LOG_OWNERS.pop(old, None)
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+            LOG_OWNERS[log_file] = self.sink
+            if log_file != self.log_file:
+                fresh = True
+            self.log_file = log_file
         if fresh:
             open(self.log_file, "wb").close()
         with open(self.log_file, "ab") as fh:
