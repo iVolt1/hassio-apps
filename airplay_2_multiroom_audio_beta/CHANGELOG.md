@@ -6,6 +6,10 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Web panel: each sound card output with free channel pairs has a **Create default
+  sinks** button that creates one remap sink per free pair (Front, Rear, Center/LFE, Side
+  in the card's channel order; one Stereo sink on a 2-channel card), each under its
+  system name, ready to be renamed. Pairs already in use are skipped.
 - Web panel: **Combine sinks** section — a list of combine sinks with their members and
   whether their zone is running (Remove, or Adopt for one made elsewhere), and a form to
   create one: name, description, and checkboxes for any number of sinks, grouped as zones
