@@ -209,6 +209,50 @@ def list_remap_sinks():
     return names
 
 
+def all_sink_names():
+    """Every sink name, or None if pactl could not be queried."""
+    try:
+        res = subprocess.run(["pactl", "list", "sinks", "short"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    return {p[1] for p in (l.split() for l in res.stdout.splitlines()) if len(p) >= 2}
+
+
+def wanted_combines():
+    """[(name, [member sinks])] from the combine_sinks option."""
+    try:
+        entries = json.loads(OPTIONS_FILE.read_text()).get("combine_sinks") or []
+    except (OSError, ValueError):
+        return []
+    out = []
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("name"):
+            members = [m.strip() for m in str(e.get("sinks", "")).split(",") if m.strip()]
+            if len(set(members)) >= 2:
+                out.append((str(e["name"]).strip(), members))
+    return out
+
+
+COMBINE_STATE_FILE = Path(os.environ.get("SZM_COMBINE_STATE_FILE",
+                                         "/config/combine_sinks_state.json"))
+REMAP_SINKS_SCRIPT = os.environ.get("SZM_REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
+
+
+def run_remap_sinks(*extra):
+    try:
+        r = subprocess.run(["python3", "-I", REMAP_SINKS_SCRIPT, "--load", *extra],
+                           capture_output=True, text=True, timeout=120)
+        for line in r.stdout.splitlines():
+            if ("already loaded" not in line and
+                    ("loaded" in line or "NOT" in line or "failed" in line or "reloading" in line)):
+                log.info("%s", line)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("remap_sinks.py --load failed: %s", e)
+
+
 def remap_modules():
     """[(module_index, argument_string)] for every module-remap-sink, or None
     if pactl could not be queried."""
@@ -482,6 +526,7 @@ class Manager:
         self.last_sink_event = 0.0
         self.pactl_subscribe = None
         self.pulse_restarted = False   # set when the PulseAudio connection dropped
+        self.prev_sinks = None         # every sink name at the last combine check
 
     def _udp_base_for(self, sink: str) -> int:
         if sink not in self.udp_bases:
@@ -552,18 +597,15 @@ class Manager:
                 bounce_and_recreate_remaps(desired)
                 # Combine sinks (and remap sinks this add-on manages but the
                 # recreate above didn't see) come back from the options.
-                try:
-                    r = subprocess.run(["python3", "-I", "/usr/sbin/remap_sinks.py", "--load"],
-                                       capture_output=True, text=True, timeout=120)
-                    for line in r.stdout.splitlines():
-                        if "loaded" in line or "NOT" in line or "failed" in line:
-                            log.info("%s", line)
-                except (OSError, subprocess.TimeoutExpired) as e:
-                    log.warning("remap_sinks.py --load after the PulseAudio restart failed: %s", e)
+                run_remap_sinks()
+                self.prev_sinks = None
                 names = list_remap_sinks() or names
                 desired = self._desired(names)
                 add = [s for s in desired if s not in self.zones]
                 remove = []
+
+        if self.booted:
+            self._check_combines()
 
         if not self.booted:
             self.booted = True
@@ -583,6 +625,35 @@ class Manager:
             log.info("Stopped zone for '%s' (sink is gone; its port stays reserved)", s)
         for s in add:
             self._start_zone(s)
+
+    def _check_combines(self):
+        """Loads a combine sink whose members have all appeared, or reloads
+        one a member of which came back (e.g. a Bluetooth speaker turned on):
+        PulseAudio drops a member that goes away and doesn't take it back.
+        remap_sinks.py does the work; its new sink is then picked up here as
+        a zone like any other."""
+        wanted = wanted_combines()
+        sinks = all_sink_names() if wanted else None
+        if sinks is None:
+            self.prev_sinks = None
+            return
+        prev, self.prev_sinks = self.prev_sinks, sinks
+        if prev is None:
+            return
+        appeared = sinks - prev
+        todo = [n for n, members in wanted
+                if all(m in sinks for m in members) and (n not in sinks or appeared & set(members))]
+        if not todo:
+            return
+        # remap_sinks.py already reloads a combine sink when it reloads one
+        # of its members (rename, profile switch); skip right after that.
+        try:
+            if time.time() - COMBINE_STATE_FILE.stat().st_mtime < 15:
+                return
+        except OSError:
+            pass
+        log.info("Combine sink(s) %s: all members present again; (re)loading", ", ".join(todo))
+        run_remap_sinks("--reload-combine", ",".join(todo))
 
     def supervise(self):
         now = time.time()

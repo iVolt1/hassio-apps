@@ -22,6 +22,11 @@ set; that restarts only that zone.
                     in card_profiles, re-points that card's remap_sinks
                     entries to its new sink where their pair still exists,
                     then the same as apply
+  POST /api/combine/create {"name", "description", "sinks": [...]}: adds a
+                    combine sink (two or more member sinks of any kind)
+  POST /api/combine/remove {"index"}: removes a combine_sinks entry
+  POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
+                    (all three then the same as apply)
   POST /api/zone    {"key", "name", "offset_ms", "volume_max_db"}: writes
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
@@ -380,10 +385,44 @@ def state() -> dict:
         cards[-1]["free_channels"] = [c for c in order if c not in taken and rs.CHANNEL_RE.match(c)]
         sn = rs.system_name(s["name"], "front", descs)
         cards[-1]["name_base"] = sn[:-len("_fl_fr")] if sn else ""
+    # Combine sinks: configured ones, then unmanaged ones loaded now.
+    # rs.COMBINE_MODS was filled by rs.loaded_remap_modules() above.
+    sink_names = {s["name"] for s in sinks if "name" in s}
+    combines = []
+    for index, entry in enumerate(load_combine_options()):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        members = [m.strip() for m in str(entry.get("sinks", "")).split(",") if m.strip()]
+        combines.append({"name": name, "members": members, "index": index, "managed": True,
+                         "description": str(entry.get("description", "") or ""),
+                         "loaded": name in rs.COMBINE_MODS,
+                         "missing": [m for m in members if m not in sink_names],
+                         "zone_running": name in running})
+    for name, (_, args) in rs.COMBINE_MODS.items():
+        if not any(c["name"] == name for c in combines):
+            slaves = rs.arg_of(args, "slaves") or ""
+            m = re.search(r"device\.description='([^'\"]*)'", args)
+            combines.append({"name": name, "members": [x for x in slaves.split(",") if x],
+                             "index": None, "managed": False, "loaded": True,
+                             "description": m.group(1) if m else "", "missing": [],
+                             "zone_running": name in running, "adoptable": bool(slaves)})
+    choices = []
+    for s in sinks:
+        drv, n = s.get("driver", ""), s.get("name", "")
+        if not n or "combine" in drv or n.endswith(".monitor"):
+            continue
+        kind = "remap" if "remap" in drv else "bluetooth" if n.startswith("bluez_") else \
+               "card" if "alsa" in drv else "other"
+        master = next((r["master"] for r in remaps if r["name"] == n), "")
+        choices.append({"name": n, "description": s.get("description", ""), "kind": kind,
+                        "master": master})
+
     pa_cards = list_cards()
     for c in pa_cards:
         c["outputs"] = card_outputs(c["name"], [s["name"] for s in cards])
-    return {"zones": zones(), "pa_cards": pa_cards, "cards": cards, "remap_sinks": remaps}
+    return {"zones": zones(), "pa_cards": pa_cards, "cards": cards, "remap_sinks": remaps,
+            "combine_sinks": combines, "sink_choices": choices}
 
 
 # -- apply ----------------------------------------------------------------
@@ -588,6 +627,69 @@ def create_sink(master: str, pair: str, left: str = "", right: str = "") -> list
     return change_and_apply(change)
 
 
+def load_combine_options() -> list:
+    try:
+        entries = json.loads(OPTIONS_FILE.read_text()).get("combine_sinks") or []
+    except (OSError, ValueError):
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def create_combine(name: str, description: str, members: list) -> list:
+    """Adds a combine sink of two or more existing sinks of any kind."""
+    st = state()
+    name = name.strip()
+    if not rs.NAME_RE.match(name):
+        raise ApplyError("name: letters, digits, _ . - only")
+    taken = {c["name"] for c in st["sink_choices"]} | {r["name"] for r in st["remap_sinks"]} | \
+            {c["name"] for c in st["combine_sinks"]}
+    if name in taken:
+        raise ApplyError(f"{name} is already the name of a sink")
+    members = list(dict.fromkeys(str(m).strip() for m in members if str(m).strip()))
+    if len(members) < 2:
+        raise ApplyError("pick at least two sinks")
+    known = {c["name"] for c in st["sink_choices"]}
+    unknown = [m for m in members if m not in known]
+    if unknown:
+        raise ApplyError(f"no such sink: {', '.join(unknown)}; reload the page")
+    description = description.strip()
+    if '"' in description or "'" in description:
+        raise ApplyError("description: no quotes")
+
+    def edit_options(options):
+        entry = {"name": name, "sinks": ",".join(members)}
+        if description:
+            entry["description"] = description
+        options.setdefault("combine_sinks", []).append(entry)
+        return [f"create combine sink {name}: {', '.join(members)}"]
+    return change_and_apply(lambda entries, descs: [], edit_options)
+
+
+def remove_combine(index) -> list:
+    def edit_options(options):
+        entries = options.get("combine_sinks") or []
+        try:
+            entry = entries.pop(int(index))
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError("no such combine sink; reload the page")
+        return [f"remove combine sink {entry.get('name')}"]
+    return change_and_apply(lambda entries, descs: [], edit_options)
+
+
+def adopt_combine(name: str) -> list:
+    c = next((c for c in state()["combine_sinks"] if c["name"] == name and not c["managed"]), None)
+    if not c or not c.get("adoptable"):
+        raise ApplyError(f"{name} is not an unmanaged combine sink; reload the page")
+
+    def edit_options(options):
+        entry = {"name": name, "sinks": ",".join(c["members"])}
+        if c["description"]:
+            entry["description"] = c["description"]
+        options.setdefault("combine_sinks", []).append(entry)
+        return [f"adopt combine sink {name}: {', '.join(c['members'])}"]
+    return change_and_apply(lambda entries, descs: [], edit_options)
+
+
 def adopt_sink(name: str) -> list:
     """Adds an unmanaged sink to the options under its current name, so its
     zone and Music Assistant player stay the same."""
@@ -724,8 +826,12 @@ input.nm.changed{border-color:#4a6a96}
 .btn{min-height:44px;padding:0 18px;border-radius:8px;font:600 14px system-ui,sans-serif;cursor:pointer}
 .btn.pri{border:0;background:#3d8bfd;color:#0b1220}.btn.sec{border:1px solid #353b46;background:transparent;color:#e6e8eb;font-weight:500}
 .btn:disabled{opacity:.5;cursor:default}
-pre#result,pre#zresult,pre#cresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
-pre#result.err,pre#zresult.err,pre#cresult.err{color:#f0b26a}
+.kgroup{flex:1 1 240px;min-width:0}.kgroup h3{margin:0 0 6px;font-size:12px;color:#9aa3ae;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+form.create .kgroup label{display:flex;gap:10px;align-items:flex-start;padding:8px 0;margin:0;border-top:1px solid #23272f;cursor:pointer;font-size:14px;color:#e6e8eb;font-weight:400}
+.kgroup input{width:18px;height:18px;margin-top:2px;flex:none}
+#kwarn{color:#f0b26a;font-size:13px}
+pre#result,pre#zresult,pre#cresult,pre#kresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
+pre#result.err,pre#zresult.err,pre#cresult.err,pre#kresult.err{color:#f0b26a}
 .btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
 form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
 form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
@@ -798,6 +904,28 @@ document.querySelectorAll('button.zsave').forEach(b => b.addEventListener('click
   post('api/zone', {key: b.dataset.key, name: v('name'), offset_ms: v('offset_ms'),
                     volume_max_db: v('volume_max_db')}, 'zresult', 8000);
 }));
+const kName = document.getElementById('k_name'), kCreate = document.getElementById('kcreate'),
+      kWarn = document.getElementById('kwarn');
+const kChecked = () => [...document.querySelectorAll('input.kmem:checked')];
+function kSync() {
+  if (!kCreate) return;
+  const sel = kChecked(), cards = new Set(sel.filter(c => c.dataset.kind === 'card').map(c => c.value));
+  const dup = sel.filter(c => c.dataset.kind === 'remap' && cards.has(c.dataset.master)).map(c => c.value);
+  kWarn.hidden = !dup.length;
+  kWarn.textContent = dup.length ? `${dup.join(', ')} ${dup.length > 1 ? 'are' : 'is'} on a card whose whole output is also picked: those speakers would play everything twice.` : '';
+  kCreate.disabled = sel.length < 2 || !/^[A-Za-z0-9_.-]+$/.test(kName.value.trim());
+}
+document.querySelectorAll('input.kmem').forEach(c => c.addEventListener('change', kSync));
+if (kName) { kName.addEventListener('input', kSync); kSync();
+  kCreate.addEventListener('click', () => post('api/combine/create', {name: kName.value.trim(),
+    description: document.getElementById('k_desc').value, sinks: kChecked().map(c => c.value)}, 'kresult')); }
+document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.armed) { post('api/combine/remove', {index: Number(b.dataset.index)}, 'kresult'); return; }
+  b.dataset.armed = '1'; b.textContent = 'Click again to remove';
+  setTimeout(() => { delete b.dataset.armed; b.textContent = 'Remove'; }, 4000);
+}));
+document.querySelectorAll('button.kadopt').forEach(b => b.addEventListener('click', () =>
+  post('api/combine/adopt', {name: b.dataset.name}, 'kresult')));
 document.querySelectorAll('button.adopt').forEach(b => b.addEventListener('click', () =>
   post('api/adopt', {name: b.dataset.name})));
 const cardSel = document.getElementById('cc_card'), pairSel = document.getElementById('cc_pair'),
@@ -992,6 +1120,50 @@ def render(st: dict) -> str:
     else:
         create_form = '<p class="sub" style="margin-top:14px">No free channels left on any sound card.</p>'
 
+    # Zones are known by their sink name; other sinks by their description.
+    label = {c["name"]: (c["name"] if c["kind"] == "remap" else c["description"] or c["name"])
+             for c in st["sink_choices"]}
+    krows = []
+    for c in st["combine_sinks"]:
+        mem = ", ".join(e(label.get(m, m)) + (' <span class="warn">(missing)</span>' if m in c["missing"] else "")
+                        for m in c["members"])
+        if not c["loaded"]:
+            kst = '<span class="warn">Not loaded (a member is missing; see log)</span>'
+        else:
+            kst = "Zone running" if c["zone_running"] else "No zone running"
+        if c["managed"]:
+            act = f'<button class="btn sec sm kremove" data-index="{c["index"]}">Remove</button>'
+        elif c.get("adoptable"):
+            kst += " · unmanaged"
+            act = f'<button class="btn sec sm kadopt" data-name="{e(c["name"])}">Adopt</button>'
+        else:
+            kst += " · unmanaged"
+            act = ""
+        krows.append(f'<tr><td class="name">{e(c["name"])}<div class="sub" style="font-family:system-ui;font-size:12px">'
+                     f'{e(c["description"])}</div></td><td>{mem}</td><td>{kst}{act}</td></tr>')
+    ktable = (f'<div class="box"><table><thead><tr><th>Name</th><th>Members</th><th>State</th></tr></thead>'
+              f'<tbody>{"".join(krows)}</tbody></table></div>') if krows else \
+             '<p class="sub" style="margin-top:14px">No combine sinks yet.</p>'
+    groups = []
+    for kind, title in (("remap", "Zones (remap sinks)"), ("card", "Sound card outputs"),
+                        ("bluetooth", "Bluetooth"), ("other", "Other sinks")):
+        items = [c for c in st["sink_choices"] if c["kind"] == kind]
+        if items:
+            groups.append(f'<div class="kgroup"><h3>{title}</h3>' + "".join(
+                f'<label><input type="checkbox" class="kmem" value="{e(c["name"])}" data-kind="{kind}" '
+                f'data-master="{e(c["master"])}"><span>{e(label[c["name"]])}'
+                + (f'<span class="mono" style="display:block">{e(c["name"])}</span>' if kind != "remap" else "")
+                + '</span></label>'
+                for c in items) + '</div>')
+    combine_html = f"""{ktable}<pre id="kresult" hidden></pre>
+<form class="create" onsubmit="return false" style="flex-direction:column;flex-wrap:nowrap;align-items:stretch">
+<div style="display:flex;flex-wrap:wrap;gap:12px">
+<div style="flex:1 1 260px"><label for="k_name">Name</label><input id="k_name" class="nm" style="min-width:0" placeholder="e.g. Outdoor"></div>
+<div style="flex:2 1 320px"><label for="k_desc">Description (optional)</label><input id="k_desc" class="nm" style="min-width:0;font-family:system-ui" placeholder="e.g. Back Yard + Workshop"></div></div>
+<div><span class="lbl">Sinks to combine (two or more)</span><div style="display:flex;flex-wrap:wrap;gap:20px">{''.join(groups)}</div></div>
+<div id="kwarn" hidden></div>
+<div><button class="btn pri" id="kcreate" type="button" disabled>Create combine sink</button></div></form>"""
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
@@ -1007,6 +1179,8 @@ def render(st: dict) -> str:
 <div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>
 <button class="btn pri" id="apply" disabled>Apply</button></div></div>
 <pre id="result" hidden></pre>{create_form}</section>
+<section><h2>Combine sinks</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
+{combine_html}</section>
 </main><script>{SCRIPT}</script></body></html>"""
 
 
@@ -1051,7 +1225,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, "Forbidden\n", "text/plain")
             return
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile"):
+        if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
+                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1068,6 +1243,15 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")),
                                     str(body.get("left", "") or ""), str(body.get("right", "") or ""))
+            elif path == "/api/combine/create":
+                sinks_ = body.get("sinks") or []
+                if not isinstance(sinks_, list):
+                    raise ApplyError("bad request")
+                lines = create_combine(str(body.get("name", "")), str(body.get("description", "")), sinks_)
+            elif path == "/api/combine/remove":
+                lines = remove_combine(body.get("index"))
+            elif path == "/api/combine/adopt":
+                lines = adopt_combine(str(body.get("name", "")))
             elif path == "/api/profile":
                 lines = set_profile(str(body.get("card", "")), str(body.get("profile", "")))
             elif path == "/api/zone":
