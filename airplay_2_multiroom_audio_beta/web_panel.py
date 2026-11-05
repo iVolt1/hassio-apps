@@ -22,6 +22,9 @@ set; that restarts only that zone.
                     in card_profiles, re-points that card's remap_sinks
                     entries to its new sink where their pair still exists,
                     then the same as apply
+  POST /api/create_defaults {"master": ...}: adds one sink per free channel
+                    pair of a card output, under their system names, then
+                    the same as apply
   POST /api/combine/create {"name", "description", "sinks": [...]}: adds a
                     combine sink (two or more member sinks of any kind)
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
@@ -372,7 +375,9 @@ def state() -> dict:
             continue
         chans = {c.strip() for c in s.get("channel_map", "").split(",") if c.strip()}
         taken = used.get(s["name"], set())
-        pairs = [p for p, needs in PAIR_NEEDS.items() if needs <= chans]
+        order = [c.strip() for c in s.get("channel_map", "").split(",") if c.strip()]
+        pairs = sorted((p for p, needs in PAIR_NEEDS.items() if needs <= chans),
+                       key=lambda p: min(order.index(c) for c in PAIR_NEEDS[p]))
         if not pairs and chans:
             pairs = ["stereo"]
         cards.append({
@@ -381,7 +386,6 @@ def state() -> dict:
             "free": [p for p in pairs if not ((PAIR_NEEDS.get(p) or chans) & taken)],
         })
         cards[-1]["free_names"] = {p: rs.system_name(s["name"], p, descs) for p in cards[-1]["free"]}
-        order = [c.strip() for c in s.get("channel_map", "").split(",") if c.strip()]
         cards[-1]["free_channels"] = [c for c in order if c not in taken and rs.CHANNEL_RE.match(c)]
         sn = rs.system_name(s["name"], "front", descs)
         cards[-1]["name_base"] = sn[:-len("_fl_fr")] if sn else ""
@@ -597,6 +601,26 @@ def set_profile(card: str, profile: str) -> list:
         return lines + change_and_apply(change, edit_options)
     except ApplyError as e:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
+
+
+def create_defaults(master: str) -> list:
+    """Adds one sink per free channel pair of a card output (Front, Rear,
+    Center/LFE, Side, in the card's order; a 2-channel card gets one Stereo
+    sink), each under its system name, ready to be renamed."""
+    card = next((c for c in state()["cards"] if c["name"] == master), None)
+    if not card:
+        raise ApplyError(f"no sound card output {master}; reload the page")
+    todo = [(p, card["free_names"].get(p)) for p in card["free"]]
+    if not todo:
+        raise ApplyError(f"{card['description']} has no free channel pairs")
+    if any(not n for _, n in todo):
+        raise ApplyError("cannot make system names for this card; add sinks in the Configuration tab")
+
+    def change(entries, descs):
+        for pair, name in todo:
+            entries.append({"name": name, "master": master, "channels": pair})
+        return [f"create {name} ({PAIR_LABEL[pair]})" for pair, name in todo]
+    return change_and_apply(change)
 
 
 def create_sink(master: str, pair: str, left: str = "", right: str = "") -> list:
@@ -919,6 +943,8 @@ document.querySelectorAll('input.kmem').forEach(c => c.addEventListener('change'
 if (kName) { kName.addEventListener('input', kSync); kSync();
   kCreate.addEventListener('click', () => post('api/combine/create', {name: kName.value.trim(),
     description: document.getElementById('k_desc').value, sinks: kChecked().map(c => c.value)}, 'kresult')); }
+document.querySelectorAll('button.cdef').forEach(b => b.addEventListener('click', () =>
+  post('api/create_defaults', {master: b.dataset.master}, 'cresult')));
 document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('click', () => {
   if (b.dataset.armed) { post('api/combine/remove', {index: Number(b.dataset.index)}, 'kresult'); return; }
   b.dataset.armed = '1'; b.textContent = 'Click again to remove';
@@ -977,6 +1003,18 @@ document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click'
 def render(st: dict) -> str:
     e = html.escape
     by_sink = {c["name"]: c for c in st["cards"]}
+
+    def output_html(o):
+        """One card output: sink name, pairs in use / free, free channels, and
+        the Create default sinks button."""
+        fc = ", ".join(rs.channel_abbr(c).upper() for c in o["free_channels"])
+        return (f'<div class="mono" style="margin-top:4px">{e(o["name"])}</div>'
+                f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in o["used"]) or "none")}'
+                f' — Free: {e(", ".join(PAIR_LABEL[p] for p in o["free"]) or "none")}</div>'
+                f'<div class="sub" style="font-size:12px">Free channels: {e(fc or "none")}</div>'
+                + (f'<button class="btn sec sm cdef" type="button" data-master="{e(o["name"])}" '
+                   f'style="margin:6px 0 0;align-self:flex-start">Create default sinks '
+                   f'({e(", ".join(PAIR_LABEL[p] for p in o["free"]))})</button>' if o["free"] else ""))
     affected = {}
     for pc in st["pa_cards"]:
         pre = card_sink_prefix(pc["name"])
@@ -992,12 +1030,7 @@ def render(st: dict) -> str:
         outs = []
         for sink in pc["outputs"]:
             shown.add(sink)
-            o = by_sink[sink]
-            fc = ", ".join(rs.channel_abbr(c).upper() for c in o["free_channels"])
-            outs.append(f'<div class="mono" style="margin-top:4px">{e(sink)}</div>'
-                        f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in o["used"]) or "none")}'
-                        f' — Free: {e(", ".join(PAIR_LABEL[p] for p in o["free"]) or "none")}</div>'
-                        f'<div class="sub" style="font-size:12px">Free channels: {e(fc or "none")}</div>')
+            outs.append(output_html(by_sink[sink]))
         card_html.append(
             f'<div class="card"><div style="font-weight:600">{e(pc["description"] or pc["name"])}</div>'
             f'<div class="mono">{e(pc["name"])}</div>'
@@ -1016,11 +1049,8 @@ def render(st: dict) -> str:
     # Sound-card sinks no PulseAudio card claims (unusual) still get shown.
     for c in st["cards"]:
         if c["name"] not in shown:
-            card_html.append(
-                f'<div class="card"><div style="font-weight:600">{e(c["description"])}</div>'
-                f'<div class="mono">{e(c["name"])}</div>'
-                f'<div>In use: {e(", ".join(PAIR_LABEL[p] for p in c["used"]) or "none")}'
-                f' — Free: {e(", ".join(PAIR_LABEL[p] for p in c["free"]) or "none")}</div></div>')
+            card_html.append(f'<div class="card"><div style="font-weight:600">{e(c["description"])}</div>'
+                             + output_html(c) + '</div>')
     cards = "".join(card_html)
 
     rows = []
@@ -1226,7 +1256,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
-                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt"):
+                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
+                        "/api/create_defaults"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1243,6 +1274,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")),
                                     str(body.get("left", "") or ""), str(body.get("right", "") or ""))
+            elif path == "/api/create_defaults":
+                lines = create_defaults(str(body.get("master", "")))
             elif path == "/api/combine/create":
                 sinks_ = body.get("sinks") or []
                 if not isinstance(sinks_, list):
