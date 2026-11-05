@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Zone logs are named after the zone's AirPlay name (`Workshop-ap2.log`, spaces as `_`)
+  instead of its sink name, so the logs folder matches the Zones list. Renaming a zone
+  starts a log under the new name and removes the old one (and the sink-named log from
+  earlier versions), never touching a log another zone uses. Two zones with the same
+  AirPlay name get `<name>__<sink>-ap2.log`. Config files stay keyed by sink name.
+
 ### Added
 - Web panel: each sound card output with free channel pairs has a **Create default
   sinks** button that creates one remap sink per free pair (Front, Rear, Center/LFE, Side
