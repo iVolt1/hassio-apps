@@ -20,7 +20,10 @@ custom.pa). Sinks made by anything else are left alone. It:
   * logs a diff of what changed
   * skips (and comments out) a configured sink whose master channels are
     already used by another sink on the same master, configured or not
-  * with --load, first sets each card in the card_profiles option to its
+  * with --load, first reloads each card in the card_options option with
+    those module-alsa-card arguments (e.g. mmap=no tsched=no, the workaround
+    for the Creative X-Fi snd_ctxfi mmap regression), then sets each card in
+    the card_profiles option to its
     profile (a card's master sink only exists under the right profile), then
     makes PulseAudio match the options (remap sinks, then the combine_sinks
     built on them), using the same lines
@@ -196,6 +199,92 @@ def card_profiles_now():
                 and not line.startswith("\t\t\t") and ": " in s:
             out[name][1].add(s.split(": ", 1)[0])
     return {k: (v[0], v[1]) for k, v in out.items()}
+
+
+# module-alsa-card arguments card_options may set; the card's identity
+# (device_id, name, card_name, ...) always comes from the loaded module.
+CARD_OPTION_KEYS = {"mmap", "tsched", "tsched_buffer_size", "tsched_buffer_watermark",
+                    "fixed_latency_range", "fragments", "fragment_size", "format", "rate",
+                    "ignore_dB", "deferred_volume", "use_ucm", "avoid_resampling"}
+MODARG_RE = re.compile(r'(\w+)=("([^"]*)"|\S+)')
+
+
+def alsa_card_modules():
+    """{card_name: (module index, [(key, raw value)])} for every loaded
+    module-alsa-card, or None if pactl can't be queried. raw values keep
+    their quotes, so the arguments can be passed back unchanged."""
+    try:
+        res = subprocess.run(["pactl", "list", "modules"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    out, idx, is_card = {}, None, False
+    for line in res.stdout.splitlines():
+        if line.startswith("Module #"):
+            idx, is_card = line[len("Module #"):].strip(), False
+        elif re.match(r"\s*Name:\s*module-alsa-card\s*$", line):
+            is_card = True
+        elif is_card and re.match(r"\s*Argument:", line):
+            args = [(m.group(1), m.group(2)) for m in MODARG_RE.finditer(line.split(":", 1)[1])]
+            name = next((v.strip('"') for k, v in args if k == "card_name"), None)
+            if name:
+                out[name] = (idx, args)
+            is_card = False
+    return out
+
+
+def apply_card_options() -> None:
+    """Reloads each card in the card_options option whose module-alsa-card
+    arguments don't already include those options, keeping its current
+    profile. PulseAudio drops the remap sinks on that card with it; they are
+    loaded again further on in this run."""
+    try:
+        wanted = json.loads(OPTIONS_FILE.read_text()).get("card_options") or []
+    except (OSError, ValueError):
+        return
+    wanted = [e for e in wanted if isinstance(e, dict)] if isinstance(wanted, list) else []
+    if not wanted:
+        return
+    mods = alsa_card_modules()
+    if mods is None:
+        log("pactl not available; not applying card options")
+        return
+    for e in wanted:
+        card = str(e.get("card", "")).strip()
+        opts = [(m.group(1), m.group(2)) for m in MODARG_RE.finditer(str(e.get("options", "")))]
+        bad = [k for k, _ in opts if k not in CARD_OPTION_KEYS]
+        if bad or not opts:
+            log(f"card options: skipping {card}: options must be module-alsa-card settings such as "
+                f"'mmap=no tsched=no' (not allowed: {', '.join(bad) or 'none given'})")
+            continue
+        if card not in mods:
+            log(f"card options: no card {card} loaded (unplugged or renamed?); skipping")
+            continue
+        idx, args = mods[card]
+        current = {k: v.strip('"') for k, v in args}
+        if all(current.get(k) == v.strip('"') for k, v in opts):
+            log(f"card options: {card} already has {' '.join(f'{k}={v}' for k, v in opts)}")
+            continue
+        new = dict(args)
+        new.update(opts)
+        new_args = " ".join(f"{k}={v}" for k, v in new.items())
+        profile = (card_profiles_now() or {}).get(card, ("", set()))[0]
+        ok, out = pactl("unload-module", idx)
+        if not ok:
+            log(f"card options: unloading {card} failed: {out}")
+            continue
+        ok, out = pactl("load-module", "module-alsa-card", new_args)
+        if not ok:
+            log(f"card options: loading {card} with {' '.join(f'{k}={v}' for k, v in opts)} "
+                f"failed ({out}); loading it as it was")
+            pactl("load-module", "module-alsa-card", " ".join(f"{k}={v}" for k, v in args))
+        else:
+            log(f"card options: reloaded {card} with {' '.join(f'{k}={v}' for k, v in opts)} "
+                f"(module #{out})")
+        if profile:
+            pactl("set-card-profile", card, profile)
 
 
 def apply_card_profiles() -> None:
@@ -642,6 +731,7 @@ def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
     if load and not dry_run:
+        apply_card_options()
         apply_card_profiles()
     old = CUSTOM_PA.read_text() if CUSTOM_PA.exists() else ""
     block, loadable, loaded, configured = build_block(load_options(), old)
