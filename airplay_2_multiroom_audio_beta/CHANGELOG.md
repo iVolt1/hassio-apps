@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- `card_options` option: extra `module-alsa-card` settings per sound card, e.g.
+  `card: alsa_card.pci-0000_04_00.0`, `options: mmap=no tsched=no`. At every start (and
+  after `ha audio restart`, via the zone manager) the card is reloaded with them, keeping
+  its profile, before card profiles and sinks are applied; a card that already has them
+  is left alone. `mmap=no tsched=no` works around the Creative X-Fi `snd_ctxfi` kernel
+  regression where the card is RUNNING in PulseAudio but plays silence.
+
 ### Changed
 - Zone logs are named after the zone's AirPlay name (`Workshop-ap2.log`, spaces as `_`)
   instead of its sink name, so the logs folder matches the Zones list. Renaming a zone

@@ -13,6 +13,14 @@ configuration:
       comma-separated list of at least two sink names, e.g. Back_Yard,Workshop.
       Loaded after the remap sinks; if a member is missing it isn't loaded.
       Members on different sound cards are kept in sync by resampling.
+  card_options:
+    name: Card options
+    description: >-
+      Extra PulseAudio module-alsa-card settings for a sound card (card is
+      its PulseAudio name, e.g. alsa_card.pci-0000_04_00.0). The card is
+      reloaded with them at every start and after an audio restart, before
+      its profile and sinks are set. "mmap=no tsched=no" works around the
+      Creative X-Fi (snd_ctxfi) kernel bug where the card plays silence.
   card_profiles:
     name: Card profiles
     description: >-
