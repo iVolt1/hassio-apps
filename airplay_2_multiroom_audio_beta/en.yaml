@@ -1,4 +1,11 @@
 configuration:
+  bt_reset_on_start:
+    name: Reset Bluetooth adapter at start
+    description: >-
+      Power-cycle the host's Bluetooth adapter(s) through BlueZ when the
+      add-on starts, before any zone starts (same as bluetoothctl power off /
+      power on). For adapters that stay connected but stop playing audio.
+      The web panel's Bluetooth section has a button for doing this any time.
   log_level:
     name: shairport-sync log level
     description: >-

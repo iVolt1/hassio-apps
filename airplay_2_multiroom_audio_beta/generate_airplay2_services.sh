@@ -352,6 +352,15 @@ python3 -I /usr/sbin/remap_sinks.py --load >> "$log_file" 2>&1 \
 # starts: the master-sink bounce, remap sink recreate and duplicate
 # cleanup, so the manager always sees remap sinks in their fresh state.
 
+# --- Optional: power-cycle the Bluetooth adapter(s) (bt_reset_on_start) ---
+# Before any zone starts, so Bluetooth zones come up on a freshly reset
+# adapter; the sinks reconnect through their BlueZ client a few seconds later
+# and sink_zone_manager picks them up then.
+if [ "$(jq -r '.bt_reset_on_start // false' /data/options.json 2>/dev/null)" = "true" ]; then
+    python3 /usr/sbin/bt_reset.py >> "$log_file" 2>&1 \
+        || echo "bt_reset_on_start: reset failed, continuing (see above)" >> "$log_file"
+fi
+
 # --- One-time, container-wide services: dbus -> avahi -> nqptp -> castbridge-manager ---
 DBUS_SERVICE="${BASE_DIR}/airplay2-dbus"
 if [ ! -d "$DBUS_SERVICE" ]; then
@@ -359,9 +368,12 @@ if [ ! -d "$DBUS_SERVICE" ]; then
     echo "longrun" > "${DBUS_SERVICE}/type"
     cat > "${DBUS_SERVICE}/run" <<'EOF'
 #!/usr/bin/with-contenv bashio
-mkdir -p /run/dbus
+# Private bus for avahi/shairport-sync at /run/ap2-dbus (DBUS_SYSTEM_BUS_ADDRESS
+# in the Dockerfile points every client here): /run/dbus is the HOST bus,
+# bind-mounted read-only by host_dbus for bt_reset.py.
+mkdir -p /run/ap2-dbus
 [ -f /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
-exec dbus-daemon --system --nofork --nopidfile
+exec dbus-daemon --system --nofork --nopidfile --address=unix:path=/run/ap2-dbus/system_bus_socket
 EOF
     chmod +x "${DBUS_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-dbus"

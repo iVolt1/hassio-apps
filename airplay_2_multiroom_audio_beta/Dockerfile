@@ -60,6 +60,8 @@ COPY --from=alpine-builder /tmp/shairport-ap2-install/usr/bin/shairport-sync /us
 RUN mkdir -p /config/shairport-sync /config/cast-bridge /media/music/castbridge /run/dbus
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV S6_KEEP_ENV=1
+# The add-on's private bus (avahi, shairport-sync); /run/dbus is the host bus (host_dbus).
+ENV DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/ap2-dbus/system_bus_socket
 
 WORKDIR /usr/sbin
 COPY requirements.txt .
@@ -72,6 +74,7 @@ COPY cast_bridge_zone.py /usr/sbin/cast_bridge_zone.py
 COPY sink_zone_manager.py /usr/sbin/sink_zone_manager.py
 COPY remap_sinks.py /usr/sbin/remap_sinks.py
 COPY web_panel.py /usr/sbin/web_panel.py
+COPY bt_reset.py /usr/sbin/bt_reset.py
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
              /usr/sbin/run_stage2_hooks.sh
 ENV S6_STAGE2_HOOK=/usr/sbin/run_stage2_hooks.sh
