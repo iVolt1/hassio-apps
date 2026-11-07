@@ -6,6 +6,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Zone switch: sound-card and Bluetooth zones can be switched off and on from the web
+  panel (Turn off / Turn on in the Zones section). A switched-off zone's AirPlay receiver
+  is stopped, so it disappears from AirPlay pickers and Music Assistant, while its sink,
+  port, name and settings stay; turning it on brings the same player back. Stored in the
+  new `disabled_zones` option; the zone manager acts within a few seconds of a change,
+  and switched-off zones are listed as "Off".
 - Web panel: **Bluetooth** section with a **Reset Bluetooth adapter** button that
   power-cycles the host's adapter(s) through BlueZ (`bt_reset.py`, via `dbus-send` on the
   host bus), for adapters that stay connected but stop passing audio after some hours.
