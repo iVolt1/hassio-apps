@@ -5,6 +5,19 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Web panel: **Bluetooth** section with a **Reset Bluetooth adapter** button that
+  power-cycles the host's adapter(s) through BlueZ (`bt_reset.py`, via `dbus-send` on the
+  host bus), for adapters that stay connected but stop passing audio after some hours.
+  BlueZ clients such as Bluetooth Audio Manager reconnect the sinks afterwards.
+- `bt_reset_on_start` option (default off): the same reset once at add-on start, before
+  any zone starts.
+
+### Changed
+- `host_dbus: true`, so the add-on can reach BlueZ on the host bus (mounted read-only at
+  `/run/dbus`). The add-on's own private D-Bus for avahi/shairport-sync moved to
+  `/run/ap2-dbus` (`DBUS_SYSTEM_BUS_ADDRESS`) so the two don't collide.
+
 ### Fixed
 - `card_options` option: extra `module-alsa-card` settings per sound card, e.g.
   `card: alsa_card.pci-0000_04_00.0`, `options: mmap=no tsched=no`. At every start (and

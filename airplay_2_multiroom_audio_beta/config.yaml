@@ -1,5 +1,5 @@
 name: Airplay2 Multiroom Audio Beta
-version: 0.132
+version: 0.133
 slug: airplay_2_multiroom_audio_beta
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
@@ -16,6 +16,9 @@ panel_title: AirPlay 2 Zones
 # Only so the web panel can save this add-on's own options (POST
 # /addons/self/options); the default hassio_role allows nothing broader.
 hassio_api: true
+# Host system bus (read-only at /run/dbus) so bt_reset.py can power-cycle the
+# Bluetooth adapter through BlueZ. The add-on's own avahi bus is /run/ap2-dbus.
+host_dbus: true
 # NET_ADMIN/SYS_ADMIN + apparmor off: only needed for the optional ap2_ip
 # mode (own LAN IP in a private network namespace, so nqptp's UDP 319/320
 # doesn't collide with Music Assistant's cliairplay on the same host).
@@ -35,8 +38,10 @@ options:
   card_profiles: []
   combine_sinks: []
   card_options: []
+  bt_reset_on_start: false
 schema:
   log_level: list(v|vv|vvv)
+  bt_reset_on_start: bool
   # Applied at every start (loaded / reloaded / unloaded). master is a
   # PulseAudio sink name, e.g. alsa_output.pci-0000_03_00.0.analog-surround-71
   remap_sinks:

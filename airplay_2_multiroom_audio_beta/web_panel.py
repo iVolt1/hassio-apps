@@ -34,6 +34,9 @@ set; that restarts only that zone.
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
                     shairport-sync; sink_zone_manager starts it again at once
+  POST /api/bt_reset {}: power-cycles the host's Bluetooth adapter(s) through
+                    BlueZ on the host bus (bt_reset.py); BlueZ clients then
+                    reconnect their sinks
 
 Python standard library only. Runs in the host network namespace even when
 ap2_ip is set, so Ingress can reach it; it only talks to PulseAudio through
@@ -56,6 +59,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import bt_reset
 import remap_sinks as rs
 
 PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
@@ -943,6 +947,8 @@ document.querySelectorAll('input.kmem').forEach(c => c.addEventListener('change'
 if (kName) { kName.addEventListener('input', kSync); kSync();
   kCreate.addEventListener('click', () => post('api/combine/create', {name: kName.value.trim(),
     description: document.getElementById('k_desc').value, sinks: kChecked().map(c => c.value)}, 'kresult')); }
+const btBtn = document.getElementById('btreset');
+if (btBtn) btBtn.addEventListener('click', () => post('api/bt_reset', {}, 'btresult', 10000));
 document.querySelectorAll('button.cdef').forEach(b => b.addEventListener('click', () =>
   post('api/create_defaults', {master: b.dataset.master}, 'cresult')));
 document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('click', () => {
@@ -1200,6 +1206,8 @@ def render(st: dict) -> str:
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
 <section><h1>Zones</h1><p class="sub">Every running AirPlay 2 receiver.</p>{zones_html}</section>
+<section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
+<button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
 <section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile restarts that card's zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
 <section><h2>Remap sinks</h2><p class="sub">Rename a managed sink and Apply. The system name stays as a reference.</p>
@@ -1257,7 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
-                        "/api/create_defaults"):
+                        "/api/create_defaults", "/api/bt_reset"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1290,6 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/zone":
                 lines = save_zone(str(body.get("key", "")), str(body.get("name", "")),
                                   str(body.get("offset_ms", "")), str(body.get("volume_max_db", "")))
+            elif path == "/api/bt_reset":
+                try:
+                    lines = bt_reset.reset()
+                except RuntimeError as e:
+                    raise ApplyError(str(e))
             else:
                 lines = adopt_sink(str(body.get("name", "")))
             for l in lines:
