@@ -20,6 +20,14 @@ configuration:
       comma-separated list of at least two sink names, e.g. Back_Yard,Workshop.
       Loaded after the remap sinks; if a member is missing it isn't loaded.
       Members on different sound cards are kept in sync by resampling.
+  disabled_zones:
+    name: Switched-off zones
+    description: >-
+      Zones whose AirPlay receiver is switched off (easiest from the web
+      panel's Turn off / Turn on buttons). Each entry is a zone's sink name, or
+      for a Bluetooth zone its alias with spaces as _. The sink, port, name
+      and settings stay, so turning it back on brings the same Music
+      Assistant player back.
   card_options:
     name: Card options
     description: >-

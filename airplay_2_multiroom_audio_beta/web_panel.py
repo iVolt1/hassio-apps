@@ -22,6 +22,9 @@ set; that restarts only that zone.
                     in card_profiles, re-points that card's remap_sinks
                     entries to its new sink where their pair still exists,
                     then the same as apply
+  POST /api/zone/enabled {"key", "enabled"}: switches a sound-card or
+                    Bluetooth zone off or on (disabled_zones option); the
+                    zone manager stops or starts it within a few seconds
   POST /api/create_defaults {"master": ...}: adds one sink per free channel
                     pair of a card output, under their system names, then
                     the same as apply
@@ -65,6 +68,7 @@ import remap_sinks as rs
 PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
 ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").split(","))
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
+ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
 SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
 
@@ -429,7 +433,21 @@ def state() -> dict:
     pa_cards = list_cards()
     for c in pa_cards:
         c["outputs"] = card_outputs(c["name"], [s["name"] for s in cards])
-    return {"zones": zones(), "pa_cards": pa_cards, "cards": cards, "remap_sinks": remaps,
+    zlist = zones()
+    for z in zlist:
+        z["enabled"] = True
+    running_keys = {z["key"] for z in zlist}
+    for key in sorted(load_disabled_zones()):
+        if key in running_keys:   # switched off a moment ago; still stopping
+            continue
+        ov = read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
+        zlist.append({"key": key, "name": ov.get("name") or key.replace("_", " "), "port": None,
+                      "pid": None, "kind": "sink" if key in sink_names else "bluetooth",
+                      "target": key, "uptime_s": None, "playing": None, "editable": False,
+                      "overrides": ov, "managed_overrides": {}, "hand_overrides": {},
+                      "enabled": False})
+
+    return {"zones": zlist, "pa_cards": pa_cards, "cards": cards, "remap_sinks": remaps,
             "combine_sinks": combines, "sink_choices": choices}
 
 
@@ -605,6 +623,40 @@ def set_profile(card: str, profile: str) -> list:
         return lines + change_and_apply(change, edit_options)
     except ApplyError as e:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
+
+
+def load_disabled_zones() -> set:
+    try:
+        keys = json.loads(OPTIONS_FILE.read_text()).get("disabled_zones") or []
+    except (OSError, ValueError):
+        return set()
+    return {str(k) for k in keys} if isinstance(keys, list) else set()
+
+
+def set_zone_enabled(key: str, enabled: bool) -> list:
+    """Switches a zone off (stops its AirPlay receiver, keeps its sink, port
+    and settings) or back on, by saving the disabled_zones option. The zone
+    manager notices the change and acts within a few seconds."""
+    key = str(key).strip()
+    z = next((z for z in state()["zones"] if z["key"] == key), None)
+    if not z:
+        raise ApplyError(f"no zone {key}; reload the page")
+    if z["kind"] == "cast":
+        raise ApplyError("Cast Bridge zones can't be switched here")
+    try:
+        options = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError) as e:
+        raise ApplyError(f"cannot read {OPTIONS_FILE}: {e}")
+    off = [k for k in (options.get("disabled_zones") or []) if k != key]
+    if not enabled:
+        off.append(key)
+    if sorted(off) == sorted(options.get("disabled_zones") or []):
+        return [f"{z['name']} is already {'on' if enabled else 'off'}"]
+    options["disabled_zones"] = off
+    save_options(options)
+    return [f"switched {z['name']} {'on' if enabled else 'off'}; options saved",
+            "the zone manager " + ("starts" if enabled else "stops") + " it within a few seconds" +
+            ("" if enabled else " (its sink, port and settings stay)")]
 
 
 def create_defaults(master: str) -> list:
@@ -949,6 +1001,8 @@ if (kName) { kName.addEventListener('input', kSync); kSync();
     description: document.getElementById('k_desc').value, sinks: kChecked().map(c => c.value)}, 'kresult')); }
 const btBtn = document.getElementById('btreset');
 if (btBtn) btBtn.addEventListener('click', () => post('api/bt_reset', {}, 'btresult', 10000));
+document.querySelectorAll('button.zswitch').forEach(b => b.addEventListener('click', () =>
+  post('api/zone/enabled', {key: b.dataset.key, enabled: b.dataset.on === '1'}, 'zresult', 8000)));
 document.querySelectorAll('button.cdef').forEach(b => b.addEventListener('click', () =>
   post('api/create_defaults', {master: b.dataset.master}, 'cresult')));
 document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('click', () => {
@@ -1090,7 +1144,10 @@ def render(st: dict) -> str:
 
     zrows = []
     for z in st["zones"]:
-        status = ("Playing" if z["playing"] else "Idle") if z["playing"] is not None else "Running"
+        if not z.get("enabled", True):
+            status = "Off"
+        else:
+            status = ("Playing" if z["playing"] else "Idle") if z["playing"] is not None else "Running"
         ov = z["overrides"]
         extras = []
         if "offset_s" in ov:
@@ -1106,10 +1163,16 @@ def render(st: dict) -> str:
         rid = f"ze_{len(zrows)}"
         edit_btn = (f'<button class="btn sec sm zedit-btn" data-target="{rid}">Edit</button>'
                     if z["editable"] else "")
-        zrows.append(f'<tr><td style="font-weight:600;color:#e6e8eb">{e(z["name"])}</td>'
+        if z["kind"] != "cast":
+            on = z.get("enabled", True)
+            edit_btn += (f'<button class="btn sec sm zswitch" data-key="{e(z["key"])}" '
+                         f'data-on="{"0" if on else "1"}">{"Turn off" if on else "Turn on"}</button>')
+        up = f' · up {e(ago(z["uptime_s"]))}' if z.get("enabled", True) else ""
+        zrows.append(f'<tr{"" if z.get("enabled", True) else " style=\"opacity:.6\""}>'
+                     f'<td style="font-weight:600;color:#e6e8eb">{e(z["name"])}</td>'
                      f'<td>{e(kind)}</td><td class="sys"><span class="mono">{e(z["target"])}</span></td>'
-                     f'<td>{e(z["port"] or "?")}</td><td>{e(", ".join(extras) or "—")}</td>'
-                     f'<td>{e(status)} · up {e(ago(z["uptime_s"]))}{edit_btn}</td></tr>')
+                     f'<td>{e(z["port"] or "—")}</td><td>{e(", ".join(extras) or "—")}</td>'
+                     f'<td>{e(status)}{up}{edit_btn}</td></tr>')
         if z["editable"]:
             mo = z["overrides"]   # the values in effect, set here or by hand
 
@@ -1265,7 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
-                        "/api/create_defaults", "/api/bt_reset"):
+                        "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1282,6 +1345,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")),
                                     str(body.get("left", "") or ""), str(body.get("right", "") or ""))
+            elif path == "/api/zone/enabled":
+                lines = set_zone_enabled(str(body.get("key", "")), bool(body.get("enabled")))
             elif path == "/api/create_defaults":
                 lines = create_defaults(str(body.get("master", "")))
             elif path == "/api/combine/create":

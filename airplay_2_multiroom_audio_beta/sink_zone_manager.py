@@ -221,6 +221,16 @@ def all_sink_names():
     return {p[1] for p in (l.split() for l in res.stdout.splitlines()) if len(p) >= 2}
 
 
+def disabled_zones() -> set:
+    """Zone keys switched off in the disabled_zones option (the web panel's
+    zone switch). Their sinks stay; only the AirPlay receiver is stopped."""
+    try:
+        keys = json.loads(OPTIONS_FILE.read_text()).get("disabled_zones") or []
+    except (OSError, ValueError):
+        return set()
+    return {str(k).strip() for k in keys if str(k).strip()} if isinstance(keys, list) else set()
+
+
 def wanted_combines():
     """[(name, [member sinks])] from the combine_sinks option."""
     try:
@@ -553,6 +563,7 @@ class Manager:
         self.pactl_subscribe = None
         self.pulse_restarted = False   # set when the PulseAudio connection dropped
         self.prev_sinks = None         # every sink name at the last combine check
+        self.options_mtime = None      # options.json mtime at the last supervise tick
 
     def _udp_base_for(self, sink: str) -> int:
         if sink not in self.udp_bases:
@@ -608,8 +619,10 @@ class Manager:
         if names is None:
             return
         desired = self._desired(names)
-        add = [s for s in desired if s not in self.zones]
-        remove = [s for s in self.zones if s not in desired]
+        off = disabled_zones()
+        running = [s for s in desired if s not in off]
+        add = [s for s in running if s not in self.zones]
+        remove = [s for s in self.zones if s not in running]
 
         if self.pulse_restarted:
             self.pulse_restarted = False
@@ -627,7 +640,7 @@ class Manager:
                 self.prev_sinks = None
                 names = list_remap_sinks() or names
                 desired = self._desired(names)
-                add = [s for s in desired if s not in self.zones]
+                add = [s for s in desired if s not in self.zones and s not in off]
                 remove = []
 
         if self.booted:
@@ -637,6 +650,9 @@ class Manager:
             self.booted = True
             if not desired:
                 log.warning("No remap or Bluetooth sinks found at startup. Watching for new ones.")
+            skipped = [s for s in desired if s in off]
+            if skipped:
+                log.info("Zone(s) switched off, not starting: %s", ", ".join(skipped))
             for s in add:
                 self._start_zone(s)
             log.info("Started %d zone(s). Supervising.", len(self.zones))
@@ -648,7 +664,10 @@ class Manager:
         log.info("Sink set changed: starting %s, stopping %s", add or "nothing", remove or "nothing")
         for s in remove:
             self.zones.pop(s).stop()
-            log.info("Stopped zone for '%s' (sink is gone; its port stays reserved)", s)
+            if s in off:
+                log.info("Stopped zone for '%s' (switched off; its sink and port stay)", s)
+            else:
+                log.info("Stopped zone for '%s' (sink is gone; its port stays reserved)", s)
         for s in add:
             self._start_zone(s)
 
@@ -685,6 +704,16 @@ class Manager:
         now = time.time()
         for zone in self.zones.values():
             zone.supervise(now)
+        # The web panel saves options (e.g. a zone switched off or on) while
+        # we run; reconcile right away when they change.
+        try:
+            mtime = OPTIONS_FILE.stat().st_mtime
+        except OSError:
+            mtime = None
+        if self.options_mtime is not None and mtime != self.options_mtime:
+            self.last_sink_event = 0.0
+            self.change_event.set()
+        self.options_mtime = mtime
 
     # -- pactl subscribe watcher ----------------------------------------
     def _watch_events(self):
