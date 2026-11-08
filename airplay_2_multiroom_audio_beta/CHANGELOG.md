@@ -6,6 +6,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- Version 0.141 (0.140 would read as 0.14, older than 0.139).
+- Web panel: the first table is titled **AirPlay 2 receivers and Sinks**; the Create
+  combine sink member group "Zones (remap sinks)" is now "Remap sinks"; the separate
+  Create sink section is removed (possible remap sinks are rows in the first table).
+
 - Web panel Zones table: **Player name** now shows the name the player has in AirPlay and
   Music Assistant (e.g. *Dining Room*), and editing it sets that name. For a sink this
   add-on owns, the sink is renamed to match with spaces and other characters as `_`
