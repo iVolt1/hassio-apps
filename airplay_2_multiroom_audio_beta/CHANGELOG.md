@@ -6,6 +6,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Remap sink switch: a `remap_sinks` entry with `enabled: false` stays in the options
+  but isn't loaded (if this add-on loaded it, it's unloaded, and its zone stops); it's
+  marked `# SWITCHED OFF` in `custom.pa`, and its channel pair stays reserved. Web panel:
+  Turn off / Turn on per managed sink in the Remap sinks table, warning when combine
+  sinks use it.
 - Zone switch: sound-card and Bluetooth zones can be switched off and on from the web
   panel (Turn off / Turn on in the Zones section). A switched-off zone's AirPlay receiver
   is stopped, so it disappears from AirPlay pickers and Music Assistant, while its sink,

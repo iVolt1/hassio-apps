@@ -22,6 +22,8 @@ set; that restarts only that zone.
                     in card_profiles, re-points that card's remap_sinks
                     entries to its new sink where their pair still exists,
                     then the same as apply
+  POST /api/sink/enabled {"index", "enabled"}: switches a remap_sinks entry
+                    off (kept, not loaded) or on, then the same as apply
   POST /api/zone/enabled {"key", "enabled"}: switches a sound-card or
                     Bluetooth zone off or on (disabled_zones option); the
                     zone manager stops or starts it within a few seconds
@@ -331,7 +333,7 @@ def state() -> dict:
         name = str(entry.get("name", "") or "").strip() or rs.entry_system_name(entry, descs)
         if name:
             configured[name] = {"master": master, "pair": pair, "left": left, "right": right,
-                                "index": index}
+                                "index": index, "enabled": entry.get("enabled") is not False}
 
     remaps, used = [], {}
     for args in loaded:
@@ -348,6 +350,7 @@ def state() -> dict:
             "channels": channels_label(pair, left, right) if pair else
                         (rs.arg_of(args, "master_channel_map") or "?"),
             "managed": name in configured,
+            "enabled": configured[name]["enabled"] if name in configured else True,
             "index": configured[name]["index"] if name in configured else None,
             "loaded": True,
             "zone_running": name in running,
@@ -361,6 +364,7 @@ def state() -> dict:
                 "pair": c["pair"], "left": c["left"], "right": c["right"],
                 "channels": channels_label(c["pair"], c["left"], c["right"]),
                 "managed": True, "index": c["index"], "loaded": False, "zone_running": False,
+                "enabled": c["enabled"],
             })
             used.setdefault(c["master"], set()).update(needs_of(c["pair"], c["left"], c["right"]))
 
@@ -631,6 +635,36 @@ def load_disabled_zones() -> set:
     except (OSError, ValueError):
         return set()
     return {str(k) for k in keys} if isinstance(keys, list) else set()
+
+
+def set_sink_enabled(index, enabled: bool) -> list:
+    """Switches a remap_sinks entry off (kept in the options with its name,
+    channels and reserved pair, but not loaded, so its zone stops) or on."""
+    st = state()
+    users = {}
+    for c in st["combine_sinks"]:
+        if c["managed"]:
+            for m in c["members"]:
+                users.setdefault(m, []).append(c["name"])
+
+    def change(entries, descs):
+        try:
+            entry = entries[int(index)]
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError("no such remap sink; reload the page")
+        name = entry.get("name") or rs.entry_system_name(entry, descs) or "?"
+        if (entry.get("enabled") is not False) == enabled:
+            return []
+        if enabled:
+            entry.pop("enabled", None)
+            return [f"switch {name} on"]
+        entry["enabled"] = False
+        out = [f"switch {name} off (kept in the options; its channel pair stays reserved)"]
+        if users.get(name):
+            out.append(f"combine sink(s) {', '.join(users[name])} use {name} and go offline "
+                       "until it's back on")
+        return out
+    return change_and_apply(change)
 
 
 def set_zone_enabled(key: str, enabled: bool) -> list:
@@ -1001,6 +1035,8 @@ if (kName) { kName.addEventListener('input', kSync); kSync();
     description: document.getElementById('k_desc').value, sinks: kChecked().map(c => c.value)}, 'kresult')); }
 const btBtn = document.getElementById('btreset');
 if (btBtn) btBtn.addEventListener('click', () => post('api/bt_reset', {}, 'btresult', 10000));
+document.querySelectorAll('button.sswitch').forEach(b => b.addEventListener('click', () =>
+  post('api/sink/enabled', {index: Number(b.dataset.index), enabled: b.dataset.on === '1'})));
 document.querySelectorAll('button.zswitch').forEach(b => b.addEventListener('click', () =>
   post('api/zone/enabled', {key: b.dataset.key, enabled: b.dataset.on === '1'}, 'zresult', 8000)));
 document.querySelectorAll('button.cdef').forEach(b => b.addEventListener('click', () =>
@@ -1118,7 +1154,10 @@ def render(st: dict) -> str:
         sysn = (f'<span class="mono">{e(r["system_name"])}</span>'
                 f'<button class="copy" aria-label="Copy system name" data-text="{e(r["system_name"])}">'
                 f'{COPY_ICON}</button>') if r["system_name"] else '<span class="mono">—</span>'
-        if not r["loaded"]:
+        if r["managed"] and not r.get("enabled", True):
+            st_txt = "Off" if not r["loaded"] else \
+                '<span class="warn">Off, but still loaded (not created by this add-on; see log)</span>'
+        elif not r["loaded"]:
             st_txt = '<span class="warn">Configured, not loaded (see log)</span>'
         else:
             st_txt = ("Zone running" if r["zone_running"] else "No zone running") + \
@@ -1128,11 +1167,15 @@ def render(st: dict) -> str:
                            if r.get("adoptable") else
                            f'<br><span class="sub" style="font-size:12px">Can\'t adopt: {e(r.get("adopt_note", ""))}</span>')
         if r["index"] is not None:
+            on = r.get("enabled", True)
+            st_txt += (f'<button class="btn sec sm sswitch" data-index="{r["index"]}" '
+                       f'data-on="{"0" if on else "1"}">{"Turn off" if on else "Turn on"}</button>')
             name_cell = (f'<td><input class="nm" data-index="{r["index"]}" value="{e(r["name"])}" '
                          f'aria-label="Sink name for {e(r["system_name"] or r["name"])}"></td>')
         else:
             name_cell = f'<td class="name">{e(r["name"] or "?")}</td>'
-        rows.append(f'<tr>{name_cell}<td class="sys">{sysn}</td>'
+        dim = "" if r.get("enabled", True) else ' style="opacity:.6"'
+        rows.append(f'<tr{dim}>{name_cell}<td class="sys">{sysn}</td>'
                     f'<td>{e(r["master_description"] or r["master"])}</td>'
                     f'<td>{e(r["channels"])}</td><td>{st_txt}</td></tr>')
 
@@ -1328,7 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
-                        "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled"):
+                        "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
+                        "/api/sink/enabled"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1345,6 +1389,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/create":
                 lines = create_sink(str(body.get("master", "")), str(body.get("channels", "")),
                                     str(body.get("left", "") or ""), str(body.get("right", "") or ""))
+            elif path == "/api/sink/enabled":
+                lines = set_sink_enabled(body.get("index"), bool(body.get("enabled")))
             elif path == "/api/zone/enabled":
                 lines = set_zone_enabled(str(body.get("key", "")), bool(body.get("enabled")))
             elif path == "/api/create_defaults":

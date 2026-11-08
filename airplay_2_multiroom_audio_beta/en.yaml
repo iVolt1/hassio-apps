@@ -49,6 +49,8 @@ configuration:
       channels custom takes any two channels of the card as the zone's left
       and right (left/right fields, e.g. front-center and side-left; the same
       channel twice makes a mono zone).
+      enabled: false switches a sink off: it stays in the options (name,
+      channels and its pair reserved) but isn't loaded, so it has no zone.
       Leave name empty to use the sink's system name (the card's description
       plus the pair, e.g. Creative_X_Fi_Analog_Surround_7_1_rl_rr).
       Stereo sinks to carve out of a sound card, one per zone. channels picks
