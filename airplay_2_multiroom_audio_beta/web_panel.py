@@ -1011,6 +1011,28 @@ def write_custom(path: Path, name: str, offset_ms: str, volume_max_db: str) -> l
     return lines
 
 
+def player_sink_name(row: dict, key: str, rename: bool = True) -> str:
+    """The Player name box is the name the player has in AirPlay / Music
+    Assistant. For a sink this add-on owns it also names the sink: spaces
+    and other characters become _ (Dining Room -> Dining_Room). The exact
+    spelling is kept as the zone's AirPlay name override only when it isn't
+    simply the sink name with spaces (row["_override"], "" = none).
+    Returns the sink name (key itself when rename is False)."""
+    player = str(row.get("name", "")).strip()
+    if not player:
+        raise ApplyError(f"{key}: the player name can't be empty")
+    if rename:
+        sink = re.sub(r"[^A-Za-z0-9_.-]+", "_", player).strip("_")
+        if not rs.NAME_RE.match(sink):
+            raise ApplyError(f"'{player}': needs at least one letter or digit")
+        default = sink.replace("_", " ")
+    else:
+        sink = key
+        default = str(row.get("default", "") or key.replace("_", " "))
+    row["_override"] = "" if player in (default, sink) else player
+    return sink
+
+
 def apply_players(rows: list) -> list:
     """Applies the zone table's changed rows in one pass: sink renames and
     on/off (remap_sinks and combine_sinks), AirPlay on/off (disabled_zones),
@@ -1053,9 +1075,8 @@ def apply_players(rows: list) -> list:
             card = cards.get(master)
             if not card or pair not in card["free"]:
                 raise ApplyError(f"{key}: that channel pair isn't free any more; reload the page")
-            new = str(row.get("name", key)).strip()
-            if not rs.NAME_RE.match(new):
-                raise ApplyError(f"'{new}': letters, digits, _ . - only")
+            row.setdefault("name", key)
+            new = player_sink_name(row, key)
             entry = {"name": new, "master": master, "channels": pair}
             created.append(entry)
             plan.append((row, kind, new, new, entry))
@@ -1075,10 +1096,11 @@ def apply_players(rows: list) -> list:
             if cur != key:
                 raise ApplyError(f"{key}: the options changed since the page loaded; reload the page")
         new = key
-        if entry is not None and "name" in row:
-            new = str(row["name"]).strip()
-            if not rs.NAME_RE.match(new):
-                raise ApplyError(f"'{new}': letters, digits, _ . - only")
+        if "name" in row:
+            if entry is not None:
+                new = player_sink_name(row, key)
+            else:
+                player_sink_name(row, key, rename=False)
         plan.append((row, kind, key, new, entry))
         if new != key:
             renames[key] = new
@@ -1120,18 +1142,28 @@ def apply_players(rows: list) -> list:
             lines.append(f"{label}: sink {'on' if sink_on else 'off'}")
             opts_changed = True
         ap = row.get("airplay_on")
+        if ap is None and new != key and kind != "new":
+            ap = rs.zone_is_on(options, key)   # the zone keeps its on/off across a rename
         if ap is not None:
             was_on = kind != "new" and rs.zone_is_on(options, key)
             if rs.set_zone_on(options, new, bool(ap), old_key=key):
                 opts_changed = True
             if was_on != bool(ap):
                 lines.append(f"{label}: AirPlay {'on' if ap else 'off'}")
+        cur = read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
+        override = row.get("_override", cur.get("name", ""))
+        if override != cur.get("name", ""):
+            row["custom"] = True
         if row.get("custom"):
             path = ZONE_CONFIG_DIR / f"{new}-ap2.custom"
+            try:
+                cur_ms = str(round(float(cur["offset_s"]) * 1000)) if "offset_s" in cur else ""
+            except ValueError:
+                cur_ms = ""
             lines += [f"{label}: {l}" for l in
-                      write_custom(path, str(row.get("airplay_name", "") or ""),
-                                   str(row.get("offset_ms", "") or ""),
-                                   str(row.get("volume_max_db", "") or ""))]
+                      write_custom(path, override,
+                                   str(row.get("offset_ms", cur_ms) or ""),
+                                   str(row.get("volume_max_db", cur.get("volume_max_db", "")) or ""))]
             z = running.get(key)
             if z and new == key and ap is not False and z["pid"]:
                 restart.append(z)
@@ -1270,10 +1302,10 @@ if (applyBtn) applyBtn.addEventListener('click', () => {
     if (r.dataset.index !== undefined) row.index = Number(r.dataset.index);
     if (r.dataset.master !== undefined) { row.master = r.dataset.master; row.channels = r.dataset.channels; }
     const v = n => fs.find(x => x.dataset.f === n);
-    if (v('name')) row.name = v('name').value.trim();
+    if (v('name') && isChanged(v('name'))) { row.name = v('name').value.trim(); row.default = v('name').dataset.default; }
     if (!v('airplay_on').disabled) row.airplay_on = v('airplay_on').checked;
     if (!v('sink_on').disabled) row.sink_on = v('sink_on').checked;
-    const cf = ['offset_ms', 'airplay_name', 'volume_max_db'].map(v).filter(Boolean);
+    const cf = ['offset_ms', 'volume_max_db'].map(v).filter(Boolean);
     if (cf.some(isChanged)) { row.custom = true; cf.forEach(x => row[x.dataset.f] = x.value.trim()); }
     rows.push(row);
   });
@@ -1490,13 +1522,17 @@ def render(st: dict) -> str:
         rid = f"pr_{len(prows)}"
         data = (f' data-kind="{kind}" data-key="{e(key)}"' +
                 (f' data-index="{index}"' if index is not None else "") + extra)
-        if name_editable:
-            name_html = (f'<input class="pv nm" data-f="name" value="{e(name)}" '
+        # The name the player has in AirPlay / Music Assistant.
+        if kind in ("bluetooth", "cast") and z and not ov.get("name"):
+            default = z["name"]
+        else:
+            default = name.replace("_", " ")
+        shown = ov.get("name") or default
+        if name_editable and not cast:
+            name_html = (f'<input class="pv nm" data-f="name" value="{e(shown)}" data-default="{e(default)}" '
                          f'aria-label="Player name for {e(sysname or name)}" style="min-width:200px">')
         else:
-            name_html = f'<span class="name">{e(name)}</span>'
-        if ov.get("name"):
-            name_html += f'<div class="sub" style="font-size:12px">AirPlay name: {e(ov["name"])}</div>'
+            name_html = f'<span class="name">{e(shown)}</span>'
         if note:
             name_html += f'<div class="sub" style="font-size:12px">{note}</div>'
         dis = " disabled" if cast and not cast_switch else ""
@@ -1520,13 +1556,10 @@ def render(st: dict) -> str:
         if not cast:
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
-                f'<div style="flex:2 1 240px"><label>AirPlay name (empty = player name)</label>'
-                f'<input class="pv" data-f="airplay_name" value="{e(ov.get("name", ""))}" placeholder="{e(name.replace("_", " "))}"></div>'
                 f'<div style="flex:1 1 140px"><label>Max volume (dB)</label>'
                 f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div>'
                 f'<div style="display:flex;gap:0;align-items:flex-end">{more_actions}</div></div>'
-                f'<p class="sub" style="margin:10px 0 0;font-size:12px">These save with Apply. '
-                f'Changing the player or AirPlay name makes Music Assistant see a new player.</p></td></tr>')
+                f'<p class="sub" style="margin:10px 0 0;font-size:12px">Max volume saves with Apply.</p></td></tr>')
 
     card_order = {c["name"]: i for i, c in enumerate(st["cards"])}
     pair_order = {p: i for i, p in enumerate(PAIR_LABEL)}
@@ -1555,7 +1588,7 @@ def render(st: dict) -> str:
             acts = f'<button class="btn sec sm adopt" data-name="{e(r["name"])}">Adopt</button>'
         else:
             acts = f'<span class="sub" style="font-size:12px;margin-left:10px">Can\'t adopt: {e(r.get("adopt_note", ""))}</span>'
-        player_row("remap", r["name"], r["name"], managed, r["index"], r.get("enabled", True), managed,
+        player_row("remap", r["name"], r["name"], True, r["index"], r.get("enabled", True), managed,
                    r["channels"], r["master_description"] or r["master"], r["system_name"], status, acts,
                    "" if managed else "unmanaged")
     for c in st["combine_sinks"]:
@@ -1574,15 +1607,15 @@ def render(st: dict) -> str:
                    "" if managed else "unmanaged")
     for z in [z for z in st["zones"] if z["key"] in zmap]:
         kind = {"bluetooth": "bluetooth", "cast": "cast"}.get(z["kind"], "sink")
-        player_row(kind, z["key"], z["name"] if kind != "bluetooth" else z["key"].replace("_", " "),
-                   False, None, True, False,
+        player_row(kind, z["key"], z["key"] if kind != "cast" else z["name"],
+                   kind != "cast", None, True, False,
                    {"bluetooth": "Bluetooth", "cast": "Cast Bridge"}.get(kind, "—"),
                    z["target"] if kind != "cast" else "—", None, "", "")
     zones_html = (f'<div class="box"><table class="players"><thead><tr><th>Player name</th><th>Channels</th>'
                   f'<th>AirPlay</th><th>Sink</th><th>Offset (ms)</th><th>Status</th><th>System name</th>'
                   f'<th>Card</th><th>Port</th></tr></thead><tbody>{"".join(prows)}</tbody></table></div>'
                   f'<div class="bar"><p class="sub" style="margin:0">Turning AirPlay on turns the sink on; '
-                  f'turning the sink off turns AirPlay off. Renaming a sink keeps its zone settings.</p>'
+                  f'turning the sink off turns AirPlay off. A new player name also renames the sink (spaces become _) and keeps its zone settings; Music Assistant sees it as a new player.</p>'
                   f'<div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>'
                   f'<button class="btn pri" id="apply" disabled>Apply</button></div></div>'
                   f'<pre id="result" hidden></pre>') if prows else \

@@ -6,6 +6,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- Web panel Zones table: **Player name** now shows the name the player has in AirPlay and
+  Music Assistant (e.g. *Dining Room*), and editing it sets that name. For a sink this
+  add-on owns, the sink is renamed to match with spaces and other characters as `_`
+  (*Dining Room* -> `Dining_Room`); the exact spelling is kept as the zone's AirPlay name
+  only when it isn't just the sink name with spaces. Bluetooth and unmanaged rows set the
+  AirPlay name only. The separate AirPlay name field in **More** and the "AirPlay name:"
+  note under the name are gone. A renamed zone keeps its AirPlay on/off.
+
 - **Zones are opt-in.** A zone's AirPlay receiver runs only if it is in the new
   `enabled_zones` option (the web panel's AirPlay checkbox). On a fresh install
   nothing runs, Bluetooth speakers and Cast devices included, until you tick it. Cast
