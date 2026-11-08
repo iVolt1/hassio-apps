@@ -117,7 +117,7 @@ SUPERVISE_INTERVAL_SECONDS = 10
 # Cast devices are looked for again this often, in the background, so a
 # device added to the network (or one that was off at start) gets picked up
 # without restarting the add-on. 0 = only at start.
-REDISCOVER_SECONDS = int(os.environ.get("CAST_REDISCOVER_SECONDS", "120"))
+REDISCOVER_SECONDS = int(os.environ.get("CAST_REDISCOVER_SECONDS", "5"))
 
 # shairport-sync's own documented AirPlay 2 defaults (per its
 # reference config: "Default is 48000 for AirPlay 2" / "Default is
