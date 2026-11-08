@@ -612,6 +612,7 @@ def combine_configs(remap_names: set) -> list:
         return []
     entries = opts.get("combine_sinks") or []
     out = []
+    COMBINE_OFF.clear()
     for e in entries if isinstance(entries, list) else []:
         if not isinstance(e, dict):
             continue
@@ -621,7 +622,7 @@ def combine_configs(remap_names: set) -> list:
         if not NAME_RE.match(name):
             log(f"combine sink: skipping invalid name {name!r} (letters, digits, _ . - only)")
             continue
-        if name in remap_names or any(n == name for n, _, _ in out):
+        if name in remap_names or name in COMBINE_OFF or any(n == name for n, _, _ in out):
             log(f"combine sink: skipping {name}: the name is already used by another sink")
             continue
         bad = [m for m in members if not NAME_RE.match(m)]
@@ -635,17 +636,29 @@ def combine_configs(remap_names: set) -> list:
                 log(f"combine sink {name}: quotes are not allowed in description, ignoring it")
             else:
                 args += f" sink_properties=\"device.description='{desc}'\""
+        if e.get("enabled") is False:
+            # Kept in the options but not loaded; apply_combines() unloads it
+            # if this add-on loaded it earlier.
+            COMBINE_OFF[name] = args
+            continue
         out.append((name, args, members))
+    if COMBINE_OFF:
+        log(f"combine sink(s) switched off (not loaded): {', '.join(COMBINE_OFF)}")
     return out
+
+
+COMBINE_OFF = {}   # name -> args of switched-off combine_sinks entries
 
 
 def combine_block(combos: list) -> list:
     """custom.pa lines for the combine sinks (after the remap sinks they
     use), plus unmanaged combine sinks as comments."""
     lines = [f"load-module module-combine-sink {a}" for _, a, _ in combos]
+    lines += [f"# SWITCHED OFF: load-module module-combine-sink {a}" for a in COMBINE_OFF.values()]
     names = {n for n, _, _ in combos}
     mine = load_json(COMBINE_STATE_FILE)
-    other = [a for n, (_, a) in COMBINE_MODS.items() if n not in names and n not in mine]
+    other = [a for n, (_, a) in COMBINE_MODS.items()
+             if n not in names and n not in mine and n not in COMBINE_OFF]
     if other:
         lines += ["#", "# Combine sinks loaded now but not in the add-on options (left alone):"]
         lines += [f"# load-module module-combine-sink {a}" for a in other]
@@ -681,7 +694,8 @@ def apply_combines(combos: list, changed: set, forced: set = frozenset()) -> Non
         cur = COMBINE_MODS.get(name)
         if cur and same(cur[1], cstate[name]):
             if unload_idx(name, cur[0]):
-                log(f"unloaded combine sink {name} (removed from the options)")
+                log(f"unloaded combine sink {name} " +
+                    ("(switched off)" if name in COMBINE_OFF else "(removed from the options)"))
         elif cur:
             log(f"combine sink {name} was removed from the options but is loaded with "
                 "arguments this add-on did not set; leaving it")

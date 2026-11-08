@@ -6,6 +6,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Combine sink switch: a `combine_sinks` entry with `enabled: false` stays in the options
+  but isn't loaded (if this add-on loaded it, it's unloaded, and its zone stops); it's
+  marked `# SWITCHED OFF` in `custom.pa`. Web panel: Turn off / Turn on per managed
+  combine sink in the Combine sinks table.
+- Web panel: **Delete** button for managed remap sinks (click twice to confirm). The entry
+  is removed from `remap_sinks`, its sink is unloaded and its zone stops, and its channel
+  pair is free again; warns when combine sinks use it.
 - Remap sink switch: a `remap_sinks` entry with `enabled: false` stays in the options
   but isn't loaded (if this add-on loaded it, it's unloaded, and its zone stops); it's
   marked `# SWITCHED OFF` in `custom.pa`, and its channel pair stays reserved. Web panel:

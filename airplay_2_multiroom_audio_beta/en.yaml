@@ -20,6 +20,7 @@ configuration:
       comma-separated list of at least two sink names, e.g. Back_Yard,Workshop.
       Loaded after the remap sinks; if a member is missing it isn't loaded.
       Members on different sound cards are kept in sync by resampling.
+      enabled: false keeps an entry but doesn't load it (its zone stops).
   disabled_zones:
     name: Switched-off zones
     description: >-

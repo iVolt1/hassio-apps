@@ -24,6 +24,8 @@ set; that restarts only that zone.
                     then the same as apply
   POST /api/sink/enabled {"index", "enabled"}: switches a remap_sinks entry
                     off (kept, not loaded) or on, then the same as apply
+  POST /api/sink/delete {"index"}: removes a remap_sinks entry (its sink is
+                    unloaded and its zone stops), then the same as apply
   POST /api/zone/enabled {"key", "enabled"}: switches a sound-card or
                     Bluetooth zone off or on (disabled_zones option); the
                     zone manager stops or starts it within a few seconds
@@ -34,7 +36,9 @@ set; that restarts only that zone.
                     combine sink (two or more member sinks of any kind)
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
   POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
-                    (all three then the same as apply)
+  POST /api/combine/enabled {"index", "enabled"}: switches a combine_sinks
+                    entry off (kept, not loaded) or on
+                    (all four then the same as apply)
   POST /api/zone    {"key", "name", "offset_ms", "volume_max_db"}: writes
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
@@ -412,6 +416,7 @@ def state() -> dict:
         members = [m.strip() for m in str(entry.get("sinks", "")).split(",") if m.strip()]
         combines.append({"name": name, "members": members, "index": index, "managed": True,
                          "description": str(entry.get("description", "") or ""),
+                         "enabled": entry.get("enabled") is not False,
                          "loaded": name in rs.COMBINE_MODS,
                          "missing": [m for m in members if m not in sink_names],
                          "zone_running": name in running})
@@ -420,7 +425,7 @@ def state() -> dict:
             slaves = rs.arg_of(args, "slaves") or ""
             m = re.search(r"device\.description='([^'\"]*)'", args)
             combines.append({"name": name, "members": [x for x in slaves.split(",") if x],
-                             "index": None, "managed": False, "loaded": True,
+                             "index": None, "managed": False, "loaded": True, "enabled": True,
                              "description": m.group(1) if m else "", "missing": [],
                              "zone_running": name in running, "adoptable": bool(slaves)})
     choices = []
@@ -665,6 +670,54 @@ def set_sink_enabled(index, enabled: bool) -> list:
                        "until it's back on")
         return out
     return change_and_apply(change)
+
+
+def delete_sink(index) -> list:
+    """Removes a remap_sinks entry: apply() unloads its sink (only if this
+    add-on loaded it) and the zone manager stops its zone."""
+    users = {}
+    for c in state()["combine_sinks"]:
+        if c["managed"]:
+            for m in c["members"]:
+                users.setdefault(m, []).append(c["name"])
+
+    def change(entries, descs):
+        try:
+            i = int(index)
+            if i < 0:
+                raise IndexError
+            entry = entries.pop(i)
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError("no such remap sink; reload the page")
+        name = entry.get("name") or rs.entry_system_name(entry, descs) or "?"
+        out = [f"delete {name} (its channel pair is free again)"]
+        if users.get(name):
+            out.append(f"combine sink(s) {', '.join(users[name])} use {name} and stay offline "
+                       "until you remove them or create a sink with that name again")
+        return out
+    return change_and_apply(change)
+
+
+def set_combine_enabled(index, enabled: bool) -> list:
+    """Switches a combine_sinks entry off (kept, not loaded) or on."""
+    def edit_options(options):
+        entries = options.get("combine_sinks") or []
+        try:
+            i = int(index)
+            if i < 0:
+                raise IndexError
+            entry = entries[i]
+        except (ValueError, IndexError, TypeError):
+            raise ApplyError("no such combine sink; reload the page")
+        name = entry.get("name", "?")
+        if (entry.get("enabled") is not False) == enabled:
+            return []
+        if enabled:
+            entry.pop("enabled", None)
+            return [f"switch combine sink {name} on"]
+        entry["enabled"] = False
+        return [f"switch combine sink {name} off (kept in the options; its zone stops)"]
+    return change_and_apply(lambda entries, descs: [], edit_options)
 
 
 def set_zone_enabled(key: str, enabled: bool) -> list:
@@ -1046,6 +1099,13 @@ document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('cli
   b.dataset.armed = '1'; b.textContent = 'Click again to remove';
   setTimeout(() => { delete b.dataset.armed; b.textContent = 'Remove'; }, 4000);
 }));
+document.querySelectorAll('button.kswitch').forEach(b => b.addEventListener('click', () =>
+  post('api/combine/enabled', {index: Number(b.dataset.index), enabled: b.dataset.on === '1'}, 'kresult')));
+document.querySelectorAll('button.sdelete').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.armed) { post('api/sink/delete', {index: Number(b.dataset.index)}); return; }
+  b.dataset.armed = '1'; b.textContent = 'Click again to delete';
+  setTimeout(() => { delete b.dataset.armed; b.textContent = 'Delete'; }, 4000);
+}));
 document.querySelectorAll('button.kadopt').forEach(b => b.addEventListener('click', () =>
   post('api/combine/adopt', {name: b.dataset.name}, 'kresult')));
 document.querySelectorAll('button.adopt').forEach(b => b.addEventListener('click', () =>
@@ -1169,7 +1229,8 @@ def render(st: dict) -> str:
         if r["index"] is not None:
             on = r.get("enabled", True)
             st_txt += (f'<button class="btn sec sm sswitch" data-index="{r["index"]}" '
-                       f'data-on="{"0" if on else "1"}">{"Turn off" if on else "Turn on"}</button>')
+                       f'data-on="{"0" if on else "1"}">{"Turn off" if on else "Turn on"}</button>'
+                       f'<button class="btn sec sm sdelete" data-index="{r["index"]}">Delete</button>')
             name_cell = (f'<td><input class="nm" data-index="{r["index"]}" value="{e(r["name"])}" '
                          f'aria-label="Sink name for {e(r["system_name"] or r["name"])}"></td>')
         else:
@@ -1269,19 +1330,25 @@ def render(st: dict) -> str:
     for c in st["combine_sinks"]:
         mem = ", ".join(e(label.get(m, m)) + (' <span class="warn">(missing)</span>' if m in c["missing"] else "")
                         for m in c["members"])
-        if not c["loaded"]:
+        if c["managed"] and not c.get("enabled", True):
+            kst = "Off" if not c["loaded"] else \
+                '<span class="warn">Off, but still loaded (not created by this add-on; see log)</span>'
+        elif not c["loaded"]:
             kst = '<span class="warn">Not loaded (a member is missing; see log)</span>'
         else:
             kst = "Zone running" if c["zone_running"] else "No zone running"
         if c["managed"]:
-            act = f'<button class="btn sec sm kremove" data-index="{c["index"]}">Remove</button>'
+            on = c.get("enabled", True)
+            act = (f'<button class="btn sec sm kswitch" data-index="{c["index"]}" '
+                   f'data-on="{"0" if on else "1"}">{"Turn off" if on else "Turn on"}</button>'
+                   f'<button class="btn sec sm kremove" data-index="{c["index"]}">Remove</button>')
         elif c.get("adoptable"):
             kst += " · unmanaged"
             act = f'<button class="btn sec sm kadopt" data-name="{e(c["name"])}">Adopt</button>'
         else:
             kst += " · unmanaged"
             act = ""
-        krows.append(f'<tr><td class="name">{e(c["name"])}<div class="sub" style="font-family:system-ui;font-size:12px">'
+        krows.append(f'<tr{"" if c.get("enabled", True) else " style=\"opacity:.6\""}><td class="name">{e(c["name"])}<div class="sub" style="font-family:system-ui;font-size:12px">'
                      f'{e(c["description"])}</div></td><td>{mem}</td><td>{kst}{act}</td></tr>')
     ktable = (f'<div class="box"><table><thead><tr><th>Name</th><th>Members</th><th>State</th></tr></thead>'
               f'<tbody>{"".join(krows)}</tbody></table></div>') if krows else \
@@ -1372,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
-                        "/api/sink/enabled"):
+                        "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1391,6 +1458,10 @@ class Handler(BaseHTTPRequestHandler):
                                     str(body.get("left", "") or ""), str(body.get("right", "") or ""))
             elif path == "/api/sink/enabled":
                 lines = set_sink_enabled(body.get("index"), bool(body.get("enabled")))
+            elif path == "/api/sink/delete":
+                lines = delete_sink(body.get("index"))
+            elif path == "/api/combine/enabled":
+                lines = set_combine_enabled(body.get("index"), bool(body.get("enabled")))
             elif path == "/api/zone/enabled":
                 lines = set_zone_enabled(str(body.get("key", "")), bool(body.get("enabled")))
             elif path == "/api/create_defaults":

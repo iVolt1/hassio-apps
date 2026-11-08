@@ -239,7 +239,7 @@ def wanted_combines():
         return []
     out = []
     for e in entries if isinstance(entries, list) else []:
-        if isinstance(e, dict) and e.get("name"):
+        if isinstance(e, dict) and e.get("name") and e.get("enabled") is not False:
             members = [m.strip() for m in str(e.get("sinks", "")).split(",") if m.strip()]
             if len(set(members)) >= 2:
                 out.append((str(e["name"]).strip(), members))
