@@ -53,6 +53,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -113,6 +114,10 @@ SHAIRPORT_PORT_BASE = 5150
 UDP_PORT_BASE = 6800
 HTTP_PORT_BASE = 8090
 SUPERVISE_INTERVAL_SECONDS = 10
+# Cast devices are looked for again this often, in the background, so a
+# device added to the network (or one that was off at start) gets picked up
+# without restarting the add-on. 0 = only at start.
+REDISCOVER_SECONDS = int(os.environ.get("CAST_REDISCOVER_SECONDS", "120"))
 
 # shairport-sync's own documented AirPlay 2 defaults (per its
 # reference config: "Default is 48000 for AirPlay 2" / "Default is
@@ -252,28 +257,29 @@ def discover_airplay2_names(timeout: float = AIRPLAY2_PROBE_SECONDS) -> set:
     return collector.names
 
 
-def discover_chromecasts():
-    log.info("Discovering Cast devices (up to %ds)...", DISCOVERY_TIMEOUT_SECONDS)
+def discover_chromecasts(quiet: bool = False):
+    say = log.debug if quiet else log.info
+    say("Discovering Cast devices (up to %ds)...", DISCOVERY_TIMEOUT_SECONDS)
     casts, browser = pychromecast.get_chromecasts(timeout=DISCOVERY_TIMEOUT_SECONDS)
     pychromecast.discovery.stop_discovery(browser)
 
-    log.info("Probing for existing AirPlay 2 receivers (up to %.0fs)...", AIRPLAY2_PROBE_SECONDS)
+    say("Probing for existing AirPlay 2 receivers (up to %.0fs)...", AIRPLAY2_PROBE_SECONDS)
     airplay2_names = discover_airplay2_names()
 
     if airplay2_names:
         kept = []
         for c in casts:
             if c.cast_info.friendly_name.strip().lower() in airplay2_names:
-                log.info("Excluding '%s' from Cast Bridge (already advertising its own "
+                say("Excluding '%s' from Cast Bridge (already advertising its own "
                          "AirPlay 2 receiver)", c.cast_info.friendly_name)
             else:
                 kept.append(c)
         casts = kept
 
     if casts:
-        log.info("Found %d Cast device(s): %s", len(casts),
+        say("Found %d Cast device(s): %s", len(casts),
                   ", ".join(c.cast_info.friendly_name for c in casts))
-    else:
+    elif not quiet:
         log.warning("No Cast devices found on this discovery pass.")
     return casts
 
@@ -376,11 +382,32 @@ def main():
 
     casts = discover_chromecasts()
     devices = {safe_name(c.cast_info.friendly_name): c for c in casts}
-    # The web panel lists these, so a Cast zone that is off can be switched on.
-    tmp = DISCOVERED_FILE.with_name(DISCOVERED_FILE.name + ".tmp")
-    tmp.write_text(json.dumps([{"key": k, "name": c.cast_info.friendly_name}
-                               for k, c in devices.items()]))
-    os.replace(tmp, DISCOVERED_FILE)
+
+    def publish_devices():
+        # The web panel lists these, so a Cast zone that is off can be switched on.
+        tmp = DISCOVERED_FILE.with_name(DISCOVERED_FILE.name + ".tmp")
+        tmp.write_text(json.dumps([{"key": k, "name": c.cast_info.friendly_name}
+                                   for k, c in devices.items()]))
+        os.replace(tmp, DISCOVERED_FILE)
+    publish_devices()
+
+    # Background rediscovery: the thread only finds devices; the main loop
+    # below acts on what it found (found[0] is the latest list, or None).
+    found = [None]
+    found_lock = threading.Lock()
+
+    def rediscover():
+        while True:
+            time.sleep(REDISCOVER_SECONDS)
+            try:
+                result = discover_chromecasts(quiet=True)
+            except Exception as e:  # pychromecast/zeroconf hiccups must not kill the thread
+                log.warning("Cast rediscovery failed: %s", e)
+                continue
+            with found_lock:
+                found[0] = result
+    if REDISCOVER_SECONDS > 0:
+        threading.Thread(target=rediscover, daemon=True, name="cast-rediscover").start()
 
     zones = {}  # safe_name -> {"shairport": Popen, "bridge": Popen, "zone": dict, "sp_port": int, "udp_base": int}
     udp_bases = {}
@@ -448,6 +475,39 @@ def main():
     try:
         while True:
             time.sleep(SUPERVISE_INTERVAL_SECONDS)
+            with found_lock:
+                latest, found[0] = found[0], None
+            if latest is not None:
+                new = []
+                for c in latest:
+                    name = safe_name(c.cast_info.friendly_name)
+                    old = devices.get(name)
+                    devices[name] = c
+                    if old is None:
+                        new.append(name)
+                    elif name in zones and (old.cast_info.host, old.cast_info.port) != \
+                            (c.cast_info.host, c.cast_info.port):
+                        # Same device at a new address: point its bridge there.
+                        log.info("Cast device '%s' moved to %s:%s; restarting its bridge",
+                                 name, c.cast_info.host, c.cast_info.port)
+                        entry = zones[name]
+                        entry["zone"]["chromecast_host"] = c.cast_info.host
+                        entry["zone"]["chromecast_port"] = c.cast_info.port
+                        entry["bridge"].terminate()   # restarted below with the new address
+                        try:
+                            entry["bridge"].wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            entry["bridge"].kill()
+                if new:
+                    log.info("New Cast device(s) found: %s", ", ".join(new))
+                    publish_devices()
+                    add = [n for n in new if wanted(n)]
+                    off = [n for n in new if not wanted(n)]
+                    if off:
+                        log.info("Not starting (switched off; tick AirPlay in the web panel): %s",
+                                 ", ".join(off))
+                    if add:
+                        start_zones(add)
             if options_mtime() != mtime:
                 # The web panel switched a zone on or off.
                 mtime = options_mtime()

@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- Cast Bridge: Cast devices are now looked for again every 2 minutes in the background,
+  not only when the add-on starts. A new device shows up in the web panel (and starts if
+  its AirPlay box is ticked, or always on installs from before opt-in zones); a device
+  that moved to a new IP address gets its bridge restarted with the new address. A
+  device that drops off the network keeps its zone.
+
 ### Changed
 - Version 0.141 (0.140 would read as 0.14, older than 0.139).
 - Web panel: the first table is titled **AirPlay 2 receivers and Sinks**; the Create
