@@ -79,6 +79,7 @@ import remap_sinks as rs
 PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
 ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").split(","))
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
+CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
 ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
 SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
@@ -451,10 +452,30 @@ def state() -> dict:
     for z in zlist:
         z["enabled"] = True
     running_keys = {z["key"] for z in zlist}
-    for key in sorted(load_disabled_zones()):
+    off_keys = set(load_disabled_zones())
+    cast_off = {}
+    if rs.OPT_IN_FILE.exists():
+        # Opt-in: a connected Bluetooth speaker without a running zone is an
+        # off zone (keyed by its alias, as the zone manager does).
+        masters = {r["master"] for r in remaps}
+        off_keys = {re.sub(r"[^A-Za-z0-9_-]+", "_", c["description"]).strip("_") or c["name"]
+                    for c in choices if c["kind"] == "bluetooth" and c["name"] not in masters}
+        # Cast devices the Cast Bridge found at start (cast_bridge_manager.py).
+        try:
+            cast_off = {d["key"]: d["name"] for d in json.loads(CAST_DISCOVERED_FILE.read_text())}
+        except (OSError, ValueError, KeyError, TypeError):
+            cast_off = {}
+        off_keys |= set(cast_off)
+    for key in sorted(off_keys):
         if key in running_keys:   # switched off a moment ago; still stopping
             continue
         ov = read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
+        if key in cast_off:
+            zlist.append({"key": key, "name": cast_off[key], "port": None, "pid": None,
+                          "kind": "cast", "target": "Cast Bridge", "uptime_s": None,
+                          "playing": None, "editable": False, "overrides": {},
+                          "managed_overrides": {}, "hand_overrides": {}, "enabled": False})
+            continue
         zlist.append({"key": key, "name": ov.get("name") or key.replace("_", " "), "port": None,
                       "pid": None, "kind": "sink" if key in sink_names else "bluetooth",
                       "target": key, "uptime_s": None, "playing": None, "editable": False,
@@ -640,11 +661,21 @@ def set_profile(card: str, profile: str) -> list:
 
 
 def load_disabled_zones() -> set:
+    """disabled_zones (only used before zones became opt-in)."""
+    if rs.OPT_IN_FILE.exists():
+        return set()
     try:
         keys = json.loads(OPTIONS_FILE.read_text()).get("disabled_zones") or []
     except (OSError, ValueError):
         return set()
     return {str(k) for k in keys} if isinstance(keys, list) else set()
+
+
+def load_options() -> dict:
+    try:
+        return json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def set_sink_enabled(index, enabled: bool) -> list:
@@ -739,12 +770,8 @@ def set_zone_enabled(key: str, enabled: bool) -> list:
         options = json.loads(OPTIONS_FILE.read_text())
     except (OSError, ValueError) as e:
         raise ApplyError(f"cannot read {OPTIONS_FILE}: {e}")
-    off = [k for k in (options.get("disabled_zones") or []) if k != key]
-    if not enabled:
-        off.append(key)
-    if sorted(off) == sorted(options.get("disabled_zones") or []):
+    if not rs.set_zone_on(options, key, enabled):
         return [f"{z['name']} is already {'on' if enabled else 'off'}"]
-    options["disabled_zones"] = off
     save_options(options)
     return [f"switched {z['name']} {'on' if enabled else 'off'}; options saved",
             "the zone manager " + ("starts" if enabled else "stops") + " it within a few seconds" +
@@ -1000,15 +1027,39 @@ def apply_players(rows: list) -> list:
     remaps = options.get("remap_sinks") or []
     combos = options.get("combine_sinks") or []
     running = {z["key"]: z for z in zones()}
-    off = [k for k in (options.get("disabled_zones") or []) if isinstance(k, str)]
+    options.setdefault("remap_sinks", remaps)
+    cards = None
 
-    plan, renames = [], {}
+    plan, renames, created = [], {}, []
     for row in rows:
         if not isinstance(row, dict):
             raise ApplyError("bad request")
         kind, key = str(row.get("kind", "")), str(row.get("key", "")).strip()
-        if kind not in ("remap", "combine", "bluetooth", "sink"):
+        if kind not in ("remap", "combine", "bluetooth", "sink", "new", "cast"):
             raise ApplyError(f"{key or '?'}: can't be changed here")
+        if kind == "cast":
+            if not rs.OPT_IN_FILE.exists():
+                raise ApplyError(f"{key}: Cast zones can be switched once the add-on has restarted")
+            row = {"airplay_on": row.get("airplay_on")}   # nothing else to change
+        if row.get("airplay_on") and row.get("sink_on") is False:
+            row["sink_on"] = True          # AirPlay needs the sink
+        if kind == "new":
+            # A possible remap sink (a free pair) that Sink or AirPlay creates.
+            if not (row.get("sink_on") or row.get("airplay_on")):
+                continue
+            if cards is None:
+                cards = {c["name"]: c for c in state()["cards"]}
+            master, pair = str(row.get("master", "")), str(row.get("channels", ""))
+            card = cards.get(master)
+            if not card or pair not in card["free"]:
+                raise ApplyError(f"{key}: that channel pair isn't free any more; reload the page")
+            new = str(row.get("name", key)).strip()
+            if not rs.NAME_RE.match(new):
+                raise ApplyError(f"'{new}': letters, digits, _ . - only")
+            entry = {"name": new, "master": master, "channels": pair}
+            created.append(entry)
+            plan.append((row, kind, new, new, entry))
+            continue
         entry = None
         if row.get("index") is not None and kind in ("remap", "combine"):
             lst = remaps if kind == "remap" else combos
@@ -1036,19 +1087,23 @@ def apply_players(rows: list) -> list:
     current = [n for n in
                [(e.get("name") or rs.entry_system_name(e, descs)) for e in remaps if isinstance(e, dict)] +
                [str(e.get("name", "")).strip() for e in combos if isinstance(e, dict)] if n]
-    names = [renames.get(n, n) for n in current]
+    names = [renames.get(n, n) for n in current] + [e["name"] for e in created]
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
         raise ApplyError(f"name used twice: {', '.join(dupes)}")
     others = {n for n in descs if n not in set(current)}   # sinks the options don't own
-    clash = sorted(n for n in renames.values() if n in others)
+    clash = sorted(n for n in list(renames.values()) + [e["name"] for e in created] if n in others)
     if clash:
         raise ApplyError(f"{', '.join(clash)} is already the name of another sink")
 
     lines, restart, opts_changed = [], [], False
     for row, kind, key, new, entry in plan:
         label = new if new == key else f"{key} -> {new}"
-        if new != key:
+        if kind == "new":
+            remaps.append(entry)
+            lines.append(f"create {new} ({PAIR_LABEL.get(entry['channels'], entry['channels'])})")
+            opts_changed = True
+        elif new != key:
             entry["name"] = new
             lines.append(f"rename {key} -> {new}")
             opts_changed = True
@@ -1057,7 +1112,7 @@ def apply_players(rows: list) -> list:
                 shutil.copyfile(src, dst)
                 lines.append(f"copied {src.name} to {dst.name} (zone settings follow the name)")
         sink_on = row.get("sink_on")
-        if entry is not None and sink_on is not None and (entry.get("enabled") is not False) != bool(sink_on):
+        if kind != "new" and entry is not None and sink_on is not None and (entry.get("enabled") is not False) != bool(sink_on):
             if sink_on:
                 entry.pop("enabled", None)
             else:
@@ -1066,14 +1121,11 @@ def apply_players(rows: list) -> list:
             opts_changed = True
         ap = row.get("airplay_on")
         if ap is not None:
-            was_off = key in off or new in off
-            off = [k for k in off if k not in (key, new)]
-            if not ap:
-                off.append(new)
-            if was_off != (not ap):
-                lines.append(f"{label}: AirPlay {'on' if ap else 'off'}")
-            if was_off != (not ap) or new != key:
+            was_on = kind != "new" and rs.zone_is_on(options, key)
+            if rs.set_zone_on(options, new, bool(ap), old_key=key):
                 opts_changed = True
+            if was_on != bool(ap):
+                lines.append(f"{label}: AirPlay {'on' if ap else 'off'}")
         if row.get("custom"):
             path = ZONE_CONFIG_DIR / f"{new}-ap2.custom"
             lines += [f"{label}: {l}" for l in
@@ -1091,7 +1143,6 @@ def apply_players(rows: list) -> list:
                 e["sinks"] = ",".join(renames.get(m, m) for m in members)
                 lines.append(f"combine sink {e.get('name')}: members follow the rename")
     if opts_changed:
-        options["disabled_zones"] = off
         save_options(options)
         lines.append("options saved")
         try:
@@ -1217,6 +1268,7 @@ if (applyBtn) applyBtn.addEventListener('click', () => {
     if (!fs.some(isChanged)) return;
     const row = {kind: r.dataset.kind, key: r.dataset.key};
     if (r.dataset.index !== undefined) row.index = Number(r.dataset.index);
+    if (r.dataset.master !== undefined) { row.master = r.dataset.master; row.channels = r.dataset.channels; }
     const v = n => fs.find(x => x.dataset.f === n);
     if (v('name')) row.name = v('name').value.trim();
     if (!v('airplay_on').disabled) row.airplay_on = v('airplay_on').checked;
@@ -1405,7 +1457,7 @@ def render(st: dict) -> str:
     label = {c["name"]: (c["name"] if c["kind"] == "remap" else c["description"] or c["name"])
              for c in st["sink_choices"]}
     zmap = {z["key"]: z for z in st["zones"]}
-    off_keys = load_disabled_zones()
+    opts = load_options()
     prows = []
 
     def offset_ms(ov):
@@ -1415,18 +1467,21 @@ def render(st: dict) -> str:
             return ""
 
     def player_row(kind, key, name, name_editable, index, sink_on, sink_switchable,
-                   channels, card, sysname, status, more_actions, note=""):
+                   channels, card, sysname, status, more_actions, note="", extra=""):
         z = zmap.pop(key, None)
         ov = z["overrides"] if z else read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
         cast = kind == "cast"
-        ap_on = sink_on and key not in off_keys and not cast
+        cast_switch = cast and rs.OPT_IN_FILE.exists()
+        ap_on = sink_on and kind != "new" and rs.zone_is_on(opts, key) and (cast_switch or not cast)
         if z and z.get("enabled", True):
             playing = z["playing"]
             st_txt = ("Playing" if playing else "Idle") if playing is not None else "Running"
             st_txt += f' · up {e(ago(z["uptime_s"]))}'
+        elif kind == "new":
+            st_txt = "Not created"
         elif not sink_on:
             st_txt = "Sink off"
-        elif key in off_keys:
+        elif not ap_on:
             st_txt = "AirPlay off"
         else:
             st_txt = status or "No zone running"
@@ -1434,7 +1489,7 @@ def render(st: dict) -> str:
             st_txt = status          # a warning wins
         rid = f"pr_{len(prows)}"
         data = (f' data-kind="{kind}" data-key="{e(key)}"' +
-                (f' data-index="{index}"' if index is not None else ""))
+                (f' data-index="{index}"' if index is not None else "") + extra)
         if name_editable:
             name_html = (f'<input class="pv nm" data-f="name" value="{e(name)}" '
                          f'aria-label="Player name for {e(sysname or name)}" style="min-width:200px">')
@@ -1444,7 +1499,7 @@ def render(st: dict) -> str:
             name_html += f'<div class="sub" style="font-size:12px">AirPlay name: {e(ov["name"])}</div>'
         if note:
             name_html += f'<div class="sub" style="font-size:12px">{note}</div>'
-        dis = " disabled" if cast else ""
+        dis = " disabled" if cast and not cast_switch else ""
         ap_box = (f'<input type="checkbox" class="pv ap" data-f="airplay_on"{" checked" if ap_on else ""}{dis} '
                   f'aria-label="AirPlay on for {e(name)}">')
         sk_box = (f'<input type="checkbox" class="pv sk" data-f="sink_on"{" checked" if sink_on else ""}'
@@ -1460,8 +1515,8 @@ def render(st: dict) -> str:
         prows.append(
             f'<tr class="prow" id="{rid}_r"{data}{dim}><td>{name_html}</td><td>{e(channels)}</td>'
             f'<td class="ck">{ap_box}</td><td class="ck">{sk_box}</td><td>{off_html}</td>'
-            f'<td>{e(card)}</td><td>{e((z or {}).get("port") or "—")}</td>'
-            f'<td style="white-space:nowrap">{st_txt}{more}</td><td class="sys">{sysn}</td></tr>')
+            f'<td style="white-space:nowrap">{st_txt}{more}</td><td class="sys">{sysn}</td>'
+            f'<td>{e(card)}</td><td>{e((z or {}).get("port") or "—")}</td></tr>')
         if not cast:
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
@@ -1473,7 +1528,20 @@ def render(st: dict) -> str:
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">These save with Apply. '
                 f'Changing the player or AirPlay name makes Music Assistant see a new player.</p></td></tr>')
 
-    for r in st["remap_sinks"]:
+    card_order = {c["name"]: i for i, c in enumerate(st["cards"])}
+    pair_order = {p: i for i, p in enumerate(PAIR_LABEL)}
+    items = [("r", r, card_order.get(r["master"], 999), pair_order.get(r.get("pair", ""), 99), n)
+             for n, r in enumerate(st["remap_sinks"])]
+    items += [("n", (c, p), card_order[c["name"]], pair_order.get(p, 99), 0)
+              for c in st["cards"] for p in c["free"] if c["free_names"].get(p)]
+    for t, r, *_ in sorted(items, key=lambda x: x[2:]):
+        if t == "n":
+            c, p = r
+            sn = c["free_names"][p]
+            player_row("new", sn, sn, True, None, False, True, PAIR_LABEL.get(p, p),
+                       c["description"] or c["name"], sn, "", "", "",
+                       f' data-master="{e(c["name"])}" data-channels="{e(p)}"')
+            continue
         managed = r["index"] is not None
         if not r["loaded"] and r.get("enabled", True):
             status = '<span class="warn">Configured, not loaded (see log)</span>'
@@ -1511,8 +1579,8 @@ def render(st: dict) -> str:
                    {"bluetooth": "Bluetooth", "cast": "Cast Bridge"}.get(kind, "—"),
                    z["target"] if kind != "cast" else "—", None, "", "")
     zones_html = (f'<div class="box"><table class="players"><thead><tr><th>Player name</th><th>Channels</th>'
-                  f'<th>AirPlay</th><th>Sink</th><th>Offset (ms)</th><th>Card</th><th>Port</th>'
-                  f'<th>Status</th><th>System name</th></tr></thead><tbody>{"".join(prows)}</tbody></table></div>'
+                  f'<th>AirPlay</th><th>Sink</th><th>Offset (ms)</th><th>Status</th><th>System name</th>'
+                  f'<th>Card</th><th>Port</th></tr></thead><tbody>{"".join(prows)}</tbody></table></div>'
                   f'<div class="bar"><p class="sub" style="margin:0">Turning AirPlay on turns the sink on; '
                   f'turning the sink off turns AirPlay off. Renaming a sink keeps its zone settings.</p>'
                   f'<div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>'

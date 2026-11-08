@@ -6,6 +6,23 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- **Zones are opt-in.** A zone's AirPlay receiver runs only if it is in the new
+  `enabled_zones` option (the web panel's AirPlay checkbox). On a fresh install
+  nothing runs, Bluetooth speakers and Cast devices included, until you tick it. Cast
+  devices found at start are listed in the Zones table, and their AirPlay checkbox starts
+  or stops the bridge without restarting the add-on. Installs from before
+  this version are migrated on their first start: every zone that ran is put in
+  `enabled_zones` and `disabled_zones` is emptied (it's no longer used).
+- Web panel Zones table: every **possible** remap sink is listed too, one row per free
+  channel pair of each sound card (status *Not created*), so a fresh install shows all
+  of them. Ticking **Sink** creates the sink (under the player name in the row, the
+  system name unless you change it); ticking **AirPlay** creates it and starts its zone.
+  Rows are grouped by card. Columns are now Player name, Channels, AirPlay, Sink,
+  Offset, Status, System name, Card, Port.
+- Sinks this add-on loads carry the PulseAudio property `airplay2_multiroom.managed=1`
+  (this reloads every managed sink once, on the first start of this version). A fresh
+  install unloads sinks with that property that a previous install left in
+  PulseAudio, so uninstalling with *Delete data* and reinstalling starts clean.
 - Web panel: the Zones and Remap sinks tables are merged into one **Zones** table with a
   row per remap sink, combine sink, Bluetooth zone and Cast zone. Columns: Player name
   (editable for managed sinks; renames the sink), Channels, AirPlay and Sink checkboxes,

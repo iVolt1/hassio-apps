@@ -346,72 +346,117 @@ def start_bridge_worker(zone: dict) -> subprocess.Popen:
     )
 
 
+OPT_IN_FILE = Path(os.environ.get("CAST_OPT_IN_FILE", "/data/zones_opt_in"))
+DISCOVERED_FILE = CASTBRIDGE_DIR / "discovered.json"
+
+
+def wanted(name: str) -> bool:
+    """Zones are opt-in (enabled_zones, the web panel's AirPlay checkbox)
+    once remap_sinks.py --first-run has run; before that every Cast device
+    found gets a zone, as it always did."""
+    if not OPT_IN_FILE.exists():
+        return True
+    try:
+        return name in (json.loads(OPTIONS_FILE.read_text()).get("enabled_zones") or [])
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def options_mtime() -> float:
+    try:
+        return OPTIONS_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def main():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CASTBRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
 
     casts = discover_chromecasts()
-
-    # Held from here until the map is saved below, so sink_zone_manager.py
-    # cannot add a zone between our load and our save (which would then
-    # be overwritten by our stale copy).
-    port_map_lock_fh = lock_port_map()
-    port_map = load_name_port_map(PORT_MAP_FILE)
-    http_port_map = load_name_port_map(HTTP_PORT_MAP_FILE)
+    devices = {safe_name(c.cast_info.friendly_name): c for c in casts}
+    # The web panel lists these, so a Cast zone that is off can be switched on.
+    tmp = DISCOVERED_FILE.with_name(DISCOVERED_FILE.name + ".tmp")
+    tmp.write_text(json.dumps([{"key": k, "name": c.cast_info.friendly_name}
+                               for k, c in devices.items()]))
+    os.replace(tmp, DISCOVERED_FILE)
 
     zones = {}  # safe_name -> {"shairport": Popen, "bridge": Popen, "zone": dict, "sp_port": int, "udp_base": int}
-    next_udp_base = UDP_PORT_BASE
+    udp_bases = {}
 
-    for cast in casts:
-        friendly = cast.cast_info.friendly_name
-        name = safe_name(friendly)
+    def start_zones(names):
+        # Held until the map is saved, so sink_zone_manager.py cannot add a
+        # zone between our load and our save (which would then be
+        # overwritten by our stale copy).
+        port_map_lock_fh = lock_port_map()
+        port_map = load_name_port_map(PORT_MAP_FILE)
+        http_port_map = load_name_port_map(HTTP_PORT_MAP_FILE)
+        for name in names:
+            cast = devices[name]
+            friendly = cast.cast_info.friendly_name
+            sp_port = get_or_assign_port(name, port_map, SHAIRPORT_PORT_BASE)
+            http_port = get_or_assign_port(name, http_port_map, HTTP_PORT_BASE)
+            fifo = str(PIPE_DIR / f"{name}.pipe")
+            # Each zone needs its own UDP port range (shairport-sync's AP2
+            # timing/control/data channels); one per device for this run.
+            udp_base = udp_bases.setdefault(name, UDP_PORT_BASE + 10 * len(udp_bases))
+            sp_proc = start_shairport(name, fifo, sp_port, udp_base)
+            zone = {
+                "name": friendly,
+                "fifo": fifo,
+                "chromecast_name": friendly,
+                "chromecast_host": cast.cast_info.host,
+                "chromecast_port": cast.cast_info.port,
+                "chromecast_uuid": str(cast.cast_info.uuid),
+                "chromecast_model_name": cast.cast_info.model_name,
+                "http_port": http_port,
+                "sample_rate": PIPE_SAMPLE_RATE,
+                "sample_format": FFMPEG_INPUT_FORMAT,
+                "channels": 2,
+            }
+            bridge_proc = start_bridge_worker(zone)
+            zones[name] = {"shairport": sp_proc, "bridge": bridge_proc, "zone": zone,
+                           "sp_port": sp_port, "udp_base": udp_base}
+        save_name_port_map(PORT_MAP_FILE, port_map)
+        save_name_port_map(HTTP_PORT_MAP_FILE, http_port_map)
+        port_map_lock_fh.close()  # releases the flock
 
-        sp_port = get_or_assign_port(name, port_map, SHAIRPORT_PORT_BASE)
-        http_port = get_or_assign_port(name, http_port_map, HTTP_PORT_BASE)
-        fifo = str(PIPE_DIR / f"{name}.pipe")
+    def stop_zone(name):
+        entry = zones.pop(name)
+        log.info("Stopping zone '%s' (switched off)", name)
+        for p in (entry["shairport"], entry["bridge"]):
+            p.terminate()
+        for p in (entry["shairport"], entry["bridge"]):
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
 
-        # Each zone needs its own UDP port range (shairport-sync's AP2
-        # timing/control/data channels) — reusing one across multiple
-        # simultaneously-running receivers would conflict, the same
-        # reason generate_airplay2_services.sh advances its own
-        # UDP_PORT_BASE by 10 per sink zone.
-        udp_base = next_udp_base
-        next_udp_base += 10
+    off = [n for n in devices if not wanted(n)]
+    if off:
+        log.info("Cast zone(s) switched off, not starting: %s", ", ".join(off))
+    start_zones([n for n in devices if wanted(n)])
 
-        sp_proc = start_shairport(name, fifo, sp_port, udp_base)
-
-        zone = {
-            "name": friendly,
-            "fifo": fifo,
-            "chromecast_name": friendly,
-            "chromecast_host": cast.cast_info.host,
-            "chromecast_port": cast.cast_info.port,
-            "chromecast_uuid": str(cast.cast_info.uuid),
-            "chromecast_model_name": cast.cast_info.model_name,
-            "http_port": http_port,
-            "sample_rate": PIPE_SAMPLE_RATE,
-            "sample_format": FFMPEG_INPUT_FORMAT,
-            "channels": 2,
-        }
-        bridge_proc = start_bridge_worker(zone)
-
-        zones[name] = {"shairport": sp_proc, "bridge": bridge_proc, "zone": zone,
-                        "sp_port": sp_port, "udp_base": udp_base}
-
-    save_name_port_map(PORT_MAP_FILE, port_map)
-    save_name_port_map(HTTP_PORT_MAP_FILE, http_port_map)
-    port_map_lock_fh.close()  # releases the flock
-
-    if not zones:
+    if not devices:
         log.warning("No Cast devices to bridge. Idling — restart this addon after your "
                      "Cast devices are reachable on the network to pick them up.")
 
     log.info("All zones started (%d). Supervising.", len(zones))
 
+    mtime = options_mtime()
     try:
         while True:
             time.sleep(SUPERVISE_INTERVAL_SECONDS)
+            if options_mtime() != mtime:
+                # The web panel switched a zone on or off.
+                mtime = options_mtime()
+                for name in [n for n in zones if not wanted(n)]:
+                    stop_zone(name)
+                add = [n for n in devices if n not in zones and wanted(n)]
+                if add:
+                    log.info("Starting switched-on Cast zone(s): %s", ", ".join(add))
+                    start_zones(add)
             for name, entry in zones.items():
                 if entry["shairport"].poll() is not None:
                     log.warning("shairport-sync for '%s' died, restarting", name)

@@ -31,7 +31,13 @@ custom.pa). Sinks made by anything else are left alone. It:
     ones whose entry changed, and unloads ones it loaded earlier whose entry
     was removed
 
-Usage: remap_sinks.py [--load] [--dry-run] [--reload-combine NAME[,NAME...]]
+Usage: remap_sinks.py [--first-run] [--load] [--dry-run] [--reload-combine NAME[,NAME...]]
+  --first-run: once per install (until /data/zones_opt_in exists). On a
+  fresh install it unloads sinks a previous install of this add-on left in
+  PulseAudio (they carry the airplay2_multiroom.managed property), so a
+  reinstall starts clean. On an install from before zones were opt-in it
+  turns every zone that would run today into an enabled_zones entry. From
+  then on a zone runs only if it is in enabled_zones.
   --reload-combine: reload those combine sinks even if unchanged (the zone
   manager uses it when a member that had gone away, such as a Bluetooth
   speaker, is back: PulseAudio doesn't re-add it to the combine sink)
@@ -44,6 +50,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
@@ -53,6 +61,114 @@ STATE_FILE = Path(os.environ.get("RS_STATE_FILE",
 
 COMBINE_STATE_FILE = Path(os.environ.get(
     "RS_COMBINE_STATE_FILE", str(CUSTOM_PA.with_name("combine_sinks_state.json"))))
+
+# Every sink this add-on loads carries this property, so a fresh install can
+# tell a previous install's leftovers from sinks something else loaded.
+TAG = "airplay2_multiroom.managed=1"
+
+# Exists once --first-run has run: zones are opt-in (enabled_zones).
+OPT_IN_FILE = Path(os.environ.get("RS_OPT_IN_FILE", "/data/zones_opt_in"))
+PORT_MAP_FILE = Path(os.environ.get("RS_PORT_MAP_FILE", "/config/shairport-sync/config/port_map.txt"))
+
+
+def zone_is_on(options: dict, key: str) -> bool:
+    """Whether a zone's AirPlay receiver should run. Zones are opt-in
+    (enabled_zones) once --first-run has run, else on unless in
+    disabled_zones (installs from before 0.138 until their first start)."""
+    if OPT_IN_FILE.exists():
+        return key in (options.get("enabled_zones") or [])
+    return key not in (options.get("disabled_zones") or [])
+
+
+def set_zone_on(options: dict, key: str, on: bool, old_key: str = None) -> bool:
+    """Records a zone as on or off in the options (dropping old_key, the
+    name before a rename). True if the options changed."""
+    field = "enabled_zones" if OPT_IN_FILE.exists() else "disabled_zones"
+    cur = [k for k in (options.get(field) or []) if isinstance(k, str)]
+    new = [k for k in cur if k not in (key, old_key)]
+    if on == (field == "enabled_zones"):
+        new.append(key)
+    if sorted(new) == sorted(cur):
+        return False
+    options[field] = new
+    return True
+
+
+def save_options(options: dict) -> tuple:
+    """(ok, message): saves the options through the Supervisor, then
+    /data/options.json (the Supervisor only rewrites it at start)."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return False, "no SUPERVISOR_TOKEN"
+    req = urllib.request.Request(
+        "http://supervisor/addons/self/options",
+        data=json.dumps({"options": options}).encode(), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return False, f"Supervisor refused the options: {e}"
+    except (OSError, ValueError) as e:
+        return False, f"cannot reach the Supervisor: {e}"
+    if body.get("result") != "ok":
+        return False, f"Supervisor refused the options: {body.get('message') or body}"
+    tmp = OPTIONS_FILE.with_name(OPTIONS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(options))
+    os.replace(tmp, OPTIONS_FILE)
+    return True, "options saved"
+
+
+def first_run() -> None:
+    """See --first-run in the module docstring."""
+    if OPT_IN_FILE.exists():
+        return
+    try:
+        options = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError) as e:
+        log(f"first run: cannot read {OPTIONS_FILE} ({e}); trying again next start")
+        return
+    try:
+        ports = [l.split()[0] for l in PORT_MAP_FILE.read_text().splitlines() if l.split()]
+    except OSError:
+        ports = []
+    if ports:
+        # Upgrade: keep every zone that runs today running.
+        off = set(options.get("disabled_zones") or [])
+        options["enabled_zones"] = sorted({k for k in ports if k not in off}
+                                          | set(options.get("enabled_zones") or []))
+        options["disabled_zones"] = []
+        ok, msg = save_options(options)
+        if not ok:
+            log(f"zones stay as they are for now ({msg}); trying again next start")
+            return
+        log("zones are opt-in from now on; kept on: " + (", ".join(options["enabled_zones"]) or "none"))
+    else:
+        # Fresh install: unload what a previous install left loaded.
+        ok, out = pactl("list", "modules")
+        if ok:
+            mods, idx, name = [], None, None
+            for line in out.splitlines():
+                m = re.match(r"Module #(\d+)", line)
+                if m:
+                    idx, name = m.group(1), None
+                    continue
+                m = re.match(r"\s*Name:\s*(\S+)", line)
+                if m:
+                    name = m.group(1)
+                    continue
+                m = re.match(r"\s*Argument:\s*(.*)", line)
+                if m and idx and name in ("module-remap-sink", "module-combine-sink") and TAG in m.group(1):
+                    mods.append((name, idx, sink_name_of(m.group(1)) or "?"))
+            # Combine sinks first: they sit on top of the remap sinks.
+            for name, idx, sink in sorted(mods, key=lambda x: x[0] != "module-combine-sink"):
+                ok2, err = pactl("unload-module", idx)
+                log(f"fresh install: unloaded {sink}, left by a previous install" if ok2
+                    else f"fresh install: unloading {sink} failed: {err}")
+        log("fresh install: no zones run until you switch them on in the web panel")
+    OPT_IN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OPT_IN_FILE.write_text("1\n")
+
 
 # sink_name -> module index, filled by loaded_remap_modules()
 MODULE_IDX = {}
@@ -357,11 +473,11 @@ def module_line(entry: dict, descs: dict = None):
         "channel_map=front-left,front-right",
         "remix=no",
     ]
-    if desc:
-        if '"' in desc or "'" in desc:
-            log(f"{name}: quotes are not allowed in description, ignoring it")
-        else:
-            args.insert(1, f"sink_properties=\"device.description='{desc}'\"")
+    if desc and ('"' in desc or "'" in desc):
+        log(f"{name}: quotes are not allowed in description, ignoring it")
+        desc = ""
+    args.insert(1, f"sink_properties=\"device.description='{desc}' {TAG}\"" if desc
+                else f"sink_properties={TAG}")
     return "load-module module-remap-sink " + " ".join(args)
 
 
@@ -631,11 +747,11 @@ def combine_configs(remap_names: set) -> list:
                 f"names, comma-separated (got {e.get('sinks')!r})")
             continue
         args = f"sink_name={name} slaves={','.join(members)}"
-        if desc:
-            if '"' in desc or "'" in desc:
-                log(f"combine sink {name}: quotes are not allowed in description, ignoring it")
-            else:
-                args += f" sink_properties=\"device.description='{desc}'\""
+        if desc and ('"' in desc or "'" in desc):
+            log(f"combine sink {name}: quotes are not allowed in description, ignoring it")
+            desc = ""
+        args += (f" sink_properties=\"device.description='{desc}' {TAG}\"" if desc
+                 else f" sink_properties={TAG}")
         if e.get("enabled") is False:
             # Kept in the options but not loaded; apply_combines() unloads it
             # if this add-on loaded it earlier.
@@ -753,6 +869,8 @@ def main() -> int:
     fcntl.flock(lock, fcntl.LOCK_EX)
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
+    if "--first-run" in sys.argv[1:] and not dry_run:
+        first_run()
     if load and not dry_run:
         apply_card_options()
         apply_card_profiles()

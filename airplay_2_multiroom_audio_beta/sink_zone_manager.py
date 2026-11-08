@@ -221,14 +221,30 @@ def all_sink_names():
     return {p[1] for p in (l.split() for l in res.stdout.splitlines()) if len(p) >= 2}
 
 
-def disabled_zones() -> set:
-    """Zone keys switched off in the disabled_zones option (the web panel's
-    zone switch). Their sinks stay; only the AirPlay receiver is stopped."""
+OPT_IN_FILE = Path(os.environ.get("SZM_OPT_IN_FILE", "/data/zones_opt_in"))
+
+
+class _AllBut:
+    """Set-like 'every key except these' (opt-in: off unless enabled)."""
+    def __init__(self, on):
+        self.on = on
+
+    def __contains__(self, key):
+        return key not in self.on
+
+
+def disabled_zones():
+    """Zone keys whose AirPlay receiver must not run (their sinks stay).
+    Zones are opt-in (the enabled_zones option) once remap_sinks.py
+    --first-run has run; before that, everything not in disabled_zones runs."""
     try:
-        keys = json.loads(OPTIONS_FILE.read_text()).get("disabled_zones") or []
+        opts = json.loads(OPTIONS_FILE.read_text())
     except (OSError, ValueError):
-        return set()
-    return {str(k).strip() for k in keys if str(k).strip()} if isinstance(keys, list) else set()
+        opts = {}
+    field = "enabled_zones" if OPT_IN_FILE.exists() else "disabled_zones"
+    keys = opts.get(field) or []
+    keys = {str(k).strip() for k in keys if str(k).strip()} if isinstance(keys, list) else set()
+    return _AllBut(keys) if field == "enabled_zones" else keys
 
 
 def wanted_combines():

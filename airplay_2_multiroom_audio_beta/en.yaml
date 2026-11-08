@@ -21,8 +21,15 @@ configuration:
       Loaded after the remap sinks; if a member is missing it isn't loaded.
       Members on different sound cards are kept in sync by resampling.
       enabled: false keeps an entry but doesn't load it (its zone stops).
+  enabled_zones:
+    name: Zones on
+    description: >-
+      Zones whose AirPlay receiver runs (easiest from the web panel's AirPlay
+      checkboxes). Each entry is a zone's sink name, or for a Bluetooth or
+      Cast zone its name with spaces as _. A zone not listed here doesn't run; its
+      sink, port and settings stay.
   disabled_zones:
-    name: Switched-off zones
+    name: Switched-off zones (old)
     description: >-
       Zones whose AirPlay receiver is switched off (easiest from the web
       panel's Turn off / Turn on buttons). Each entry is a zone's sink name, or
