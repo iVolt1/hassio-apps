@@ -1,5 +1,5 @@
 name: Airplay2 Multiroom Audio Beta
-version: 0.134
+version: 0.135
 slug: airplay_2_multiroom_audio_beta
 description: Create AirPlay 2 receivers from local audio devices, one per pulseaudio physical remap sink output. Remap sinks with automatic or custom names can be created in the Multi-Room Audio Controlle Home Assistand app.
 arch:
@@ -51,6 +51,7 @@ schema:
       channels: list(front|rear|side|center_lfe|stereo|custom)
       left: str?          # channels custom only: any channel of the master,
       right: str?         # e.g. front-center + side-left (same one twice = mono)
+      enabled: bool?      # false = kept in the options but not loaded (no zone)
       description: str?
   # Set at every start, before remap_sinks. card is a PulseAudio card name
   # (alsa_card...), profile one of its profiles (pactl list cards).

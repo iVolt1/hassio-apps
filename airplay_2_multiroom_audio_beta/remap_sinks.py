@@ -435,6 +435,7 @@ def build_block(entries: list, old: str = ""):
              "# block are overwritten; put your own lines outside it."]
     configured = []
     descs = sink_descriptions()
+    switched_off = []
     for entry in entries:
         line = module_line(entry if isinstance(entry, dict) else {}, descs)
         if line:
@@ -442,7 +443,15 @@ def build_block(entries: list, old: str = ""):
             if any(n == name for n, _ in configured):
                 log(f"skipping duplicate entry for {name}")
                 continue
+            if isinstance(entry, dict) and entry.get("enabled") is False:
+                # Kept in the options but not loaded; if this add-on loaded it
+                # earlier, apply() unloads it like a removed entry.
+                switched_off.append(name)
+                lines.append(f"# SWITCHED OFF: {line}")
+                continue
             configured.append((name, line[len("load-module module-remap-sink "):]))
+    if switched_off:
+        log(f"switched off (not loaded): {', '.join(switched_off)}")
     names = {n for n, _ in configured}
 
     loaded = loaded_remap_modules()
@@ -565,7 +574,7 @@ def apply(loadable: list, loaded, configured: set) -> None:
             log(f"{name} was removed from the options and is not loaded")
         elif same(current[name], state[name]):
             if unload(name):
-                log(f"unloaded {name} (removed from the options)")
+                log(f"unloaded {name} (switched off or removed from the options)")
         else:
             log(f"{name} was removed from the options but is loaded with arguments "
                 "this add-on did not set; leaving it")
