@@ -1644,7 +1644,7 @@ def render(st: dict) -> str:
         create_form = '<p class="sub" style="margin-top:14px">No free channels left on any sound card.</p>'
 
     groups = []
-    for kind, title in (("remap", "Zones (remap sinks)"), ("card", "Sound card outputs"),
+    for kind, title in (("remap", "Remap sinks"), ("card", "Sound card outputs"),
                         ("bluetooth", "Bluetooth"), ("other", "Other sinks")):
         items = [c for c in st["sink_choices"] if c["kind"] == kind]
         if items:
@@ -1668,13 +1668,11 @@ def render(st: dict) -> str:
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
-<section><h1>Zones</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
+<section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
 <section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
 <button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
 <section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile restarts that card's zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
-<section><h2>Create sink</h2><p class="sub">A new remap sink from a free channel pair; it shows up in Zones with its system name, ready to rename.</p>
-<pre id="result_c" hidden></pre>{create_form}</section>
 <section><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
 {combine_html}</section>
 </main><script>{SCRIPT}</script></body></html>"""
