@@ -5,6 +5,17 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Web panel: the Zones and Remap sinks tables are merged into one **Zones** table with a
+  row per remap sink, combine sink, Bluetooth zone and Cast zone. Columns: Player name
+  (editable for managed sinks; renames the sink), Channels, AirPlay and Sink checkboxes,
+  Offset (ms), Card, Port, Status, and the system name (with copy) on the far right.
+  Ticking AirPlay ticks Sink; unticking Sink unticks AirPlay. Edit any number of rows and
+  commit them with one **Apply** (or Discard). A row's **More** opens the AirPlay name
+  override and Max volume (also saved with Apply) plus Delete / Remove / Adopt.
+- Renaming a sink now keeps its zone's settings: its `-ap2.custom` file is copied to the
+  new name, and `disabled_zones` and combine sink members follow the rename.
+
 ### Added
 - Combine sink switch: a `combine_sinks` entry with `enabled: false` stays in the options
   but isn't loaded (if this add-on loaded it, it's unloaded, and its zone stops); it's
