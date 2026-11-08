@@ -329,7 +329,9 @@ done < <(pactl list sinks short | awk '/module-remap-sink/ {print $2}')
 # (/addon_configs/<slug>/custom.pa on the host). Runs after the recreate loop above
 # (so it sees the final sink list) and before sink_zone_manager starts (so
 # new sinks get zones on its first scan).
-python3 -I /usr/sbin/remap_sinks.py --load >> "$log_file" 2>&1 \
+# --first-run: once per install, see remap_sinks.py (zones become opt-in;
+# a fresh install unloads sinks a previous install left in PulseAudio).
+python3 -I /usr/sbin/remap_sinks.py --first-run --load >> "$log_file" 2>&1 \
     || echo "remap_sinks.py exited $? (custom.pa not updated)" >> "$log_file"
 
 # --- Sink-backed zones are no longer generated here ---------------------
