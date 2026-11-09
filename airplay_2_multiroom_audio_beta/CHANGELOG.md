@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Cast Bridge: discovery now **listens continuously** (one zeroconf instance for Cast
+  devices and AirPlay receivers) instead of re-running a discovery pass on a timer
+  (`CAST_REDISCOVER_SECONDS` is gone). A new Cast device is bridged about 5 seconds
+  after it announces itself (the wait lets a device with native AirPlay 2 be recognised
+  and left alone); a device that changes address gets its bridge restarted right away.
+  No repeated mDNS query bursts. The bridges' own AirPlay names no longer count as
+  "native AirPlay 2" for that check.
+
 ### Fixed
 - Cast Bridge: Cast devices are now looked for again every 2 minutes in the background,
   not only when the add-on starts. A new device shows up in the web panel (and starts if
