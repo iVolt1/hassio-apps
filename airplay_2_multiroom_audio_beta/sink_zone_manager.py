@@ -273,7 +273,8 @@ def run_remap_sinks(*extra):
                            capture_output=True, text=True, timeout=120)
         for line in r.stdout.splitlines():
             if ("already loaded" not in line and
-                    ("loaded" in line or "NOT" in line or "failed" in line or "reloading" in line)):
+                    ("loaded" in line or "NOT" in line or "failed" in line or "reloading" in line
+                     or "card volume" in line)):
                 log.info("%s", line)
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning("remap_sinks.py --load failed: %s", e)
@@ -579,6 +580,7 @@ class Manager:
         self.pactl_subscribe = None
         self.pulse_restarted = False   # set when the PulseAudio connection dropped
         self.prev_sinks = None         # every sink name at the last combine check
+        self.prev_cards = None         # card output sinks at the last card check
         self.options_mtime = None      # options.json mtime at the last supervise tick
 
     def _udp_base_for(self, sink: str) -> int:
@@ -660,6 +662,7 @@ class Manager:
                 remove = []
 
         if self.booted:
+            self._check_cards()
             self._check_combines()
 
         if not self.booted:
@@ -686,6 +689,20 @@ class Manager:
                 log.info("Stopped zone for '%s' (sink is gone; its port stays reserved)", s)
         for s in add:
             self._start_zone(s)
+
+    def _check_cards(self):
+        """A sound card output that appears (a USB adapter plugged in, a
+        card profile switched back): remap_sinks.py --load sets its volume
+        and loads the remap sinks that were waiting for it."""
+        sinks = all_sink_names()
+        if sinks is None:
+            return
+        cards = {n for n in sinks if n.startswith("alsa_output.")}
+        prev, self.prev_cards = self.prev_cards, cards
+        if prev is None or not (cards - prev):
+            return
+        log.info("Sound card output(s) appeared: %s", ", ".join(sorted(cards - prev)))
+        run_remap_sinks()
 
     def _check_combines(self):
         """Loads a combine sink whose members have all appeared, or reloads
