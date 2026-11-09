@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Groundwork for an AirPlay 2 -> AirPlay 1 bridge: the image now includes **cliairplay**
+  (Music Assistant's AirPlay 1/2 sender, v0.5.9, built fully static) and a test tool,
+  `ap1_test.py`, that streams a wall-clock click track to an AirPlay 1 device and
+  exercises start-at-an-instant, flush/re-anchor, volume and stop. Run by hand:
+  `docker exec -it addon_2c14ac29_airplay_2_multiroom_audio_beta python3 /usr/sbin/ap1_test.py <device ip>`.
+  Nothing runs it automatically.
+
 ### Changed
 - Web panel: in a row's **More**, Delete sink / Remove combine sink / Adopt now come first
   (left), with Max volume (dB) as a fixed-width box after them, so the button is visible

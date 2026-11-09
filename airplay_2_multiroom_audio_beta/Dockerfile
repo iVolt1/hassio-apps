@@ -10,6 +10,24 @@ RUN git clone https://github.com/mikebrady/nqptp.git && \
     make -j$(nproc) && \
     make install DESTDIR=/tmp/nqptp-install
 
+# cliairplay (Music Assistant's AirPlay 1/2 sender), for the AirPlay 1 bridge.
+# Built fully static on Debian: its prebuilt libraop libraries are glibc
+# builds, and a static binary runs on this Alpine image without gcompat.
+# Only libraop's own submodules are needed (its prebuilt targets/), not the
+# OpenSSL/BoringSSL sources nested below them.
+FROM debian:bookworm-slim AS cliairplay-builder
+ARG CLIAIRPLAY_REF=v0.5.9
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /tmp
+RUN git clone --depth 1 --branch ${CLIAIRPLAY_REF} https://github.com/music-assistant/airplay-cli.git && \
+    cd airplay-cli && \
+    git submodule update --init --depth 1 libraop && \
+    git -C libraop submodule update --init --depth 1 && \
+    make -j$(nproc) STATIC=1 EXTRA_LDFLAGS=-static VERSION=${CLIAIRPLAY_REF#v} && \
+    cp bin/cliairplay-linux-* /tmp/cliairplay && \
+    /tmp/cliairplay --check
+
 FROM ghcr.io/home-assistant/base:latest AS alpine-builder
 RUN apk add --no-cache \
     build-base git autoconf automake libtool pkgconfig \
@@ -57,6 +75,7 @@ RUN apk add -U -q --no-cache --no-progress \
     python3 py3-pip mosquitto-libs
 COPY --from=nqptp-builder /tmp/nqptp-install/usr/local/bin/nqptp /usr/local/bin/nqptp
 COPY --from=alpine-builder /tmp/shairport-ap2-install/usr/bin/shairport-sync /usr/bin/shairport-sync
+COPY --from=cliairplay-builder /tmp/cliairplay /usr/bin/cliairplay
 RUN mkdir -p /config/shairport-sync /config/cast-bridge /media/music/castbridge /run/dbus
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV S6_KEEP_ENV=1
@@ -75,6 +94,7 @@ COPY sink_zone_manager.py /usr/sbin/sink_zone_manager.py
 COPY remap_sinks.py /usr/sbin/remap_sinks.py
 COPY web_panel.py /usr/sbin/web_panel.py
 COPY bt_reset.py /usr/sbin/bt_reset.py
+COPY ap1_test.py /usr/sbin/ap1_test.py
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
              /usr/sbin/run_stage2_hooks.sh
 ENV S6_STAGE2_HOOK=/usr/sbin/run_stage2_hooks.sh
