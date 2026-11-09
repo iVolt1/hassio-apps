@@ -5,6 +5,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Web panel: in a row's **More**, Delete sink / Remove combine sink / Adopt now come first
+  (left), with Max volume (dB) as a fixed-width box after them, so the button is visible
+  without scrolling right.
+
 ### Fixed
 - Switching a card profile in the web panel could fail with `Request failed:
   SyntaxError: JSON.parse…` (a 502 from Home Assistant) and switch the card back: the
