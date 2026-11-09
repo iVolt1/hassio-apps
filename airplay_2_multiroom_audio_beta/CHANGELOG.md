@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- Switching a card profile in the web panel could fail with `Request failed:
+  SyntaxError: JSON.parse…` (a 502 from Home Assistant) and switch the card back: the
+  new card output appearing made the zone manager's hotplug check (0.144) run the sink
+  setup from the options before the panel had saved the new profile. The check now
+  waits while the panel is changing cards and runs once it's done.
+
 ### Added
 - **Card volume at start:** every sound card output a zone plays through (the master of
   a remap sink, or a card output in a combine sink) is set to its 0 dB point and

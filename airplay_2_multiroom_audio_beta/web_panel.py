@@ -586,11 +586,25 @@ def card_sink_prefix(card: str) -> str:
     return "\0"   # matches no sink
 
 
+PANEL_BUSY_FILE = Path(os.environ.get("WP_BUSY_FILE", "/tmp/airplay2_panel_busy"))
+
+
+def mark_busy() -> None:
+    """Tells the zone manager the panel is changing cards and options: its
+    hotplug check (a new card output appearing) waits instead of running
+    remap_sinks.py --load from options that are about to change."""
+    try:
+        PANEL_BUSY_FILE.write_text(str(time.time()))
+    except OSError:
+        pass
+
+
 def set_profile(card: str, profile: str) -> list:
     """Sets a card's profile now, keeps it in card_profiles, and re-points
     the card's remap_sinks entries to its new output sink where their pair
     still exists. Entries whose pair is gone stay in the options (pointing at
     the old sink), so switching back brings them back."""
+    mark_busy()
     pc = next((c for c in list_cards() if c["name"] == card), None)
     if not pc:
         raise ApplyError(f"no card {card}; reload the page")
@@ -658,6 +672,8 @@ def set_profile(card: str, profile: str) -> list:
         return lines + change_and_apply(change, edit_options)
     except ApplyError as e:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
+    finally:
+        mark_busy()   # the zone manager's hotplug check waits a little longer
 
 
 def load_disabled_zones() -> set:
