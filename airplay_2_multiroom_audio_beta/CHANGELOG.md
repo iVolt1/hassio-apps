@@ -5,6 +5,16 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Card volume at start:** every sound card output a zone plays through (the master of
+  a remap sink, or a card output in a combine sink) is set to its 0 dB point and
+  unmuted when the add-on starts, after a PulseAudio restart, and when the card
+  (re)appears, e.g. a USB adapter plugged in. The 0 dB point is PulseAudio's Base
+  Volume (100% on most cards; lower on cards whose hardware mixer would otherwise be
+  boosted). Zones keep their own volume control (AirPlay volume, Max volume). Each card
+  is set once per appearance, so a volume you change by hand stays until the card or
+  PulseAudio comes back. Bluetooth speakers are not touched. Logged as `card volume: …`.
+
 ### Changed
 - Cast Bridge: discovery now **listens continuously** (one zeroconf instance for Cast
   devices and AirPlay receivers) instead of re-running a discovery pass on a timer

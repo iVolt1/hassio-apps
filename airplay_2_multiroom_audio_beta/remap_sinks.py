@@ -863,6 +863,75 @@ def splice(old: str, block: list) -> str:
     return "\n".join(new) + "\n"
 
 
+CARD_VOLUME_STATE = Path(os.environ.get("RS_CARD_VOLUME_STATE", "/tmp/card_volume_done.json"))
+
+
+def apply_card_volumes(combos) -> None:
+    """Sets each sound card output this add-on plays through (the master of
+    a remap sink, or a card output that is a combine sink member) to its
+    0 dB point and unmutes it. Zones control their own volume (AirPlay
+    volume, Max volume), so a lower card volume only lowers their ceiling.
+    The 0 dB point is PulseAudio's Base Volume, not 100%: above it a card
+    with a hardware mixer is boosted in software and can clip. Bluetooth
+    sinks are left alone (their volume is the speaker's own). Each card is
+    set once per appearance (its owner module), so a volume changed by hand
+    later is kept until the card or PulseAudio comes back."""
+    targets = {str(e.get("master", "")) for e in load_options()
+               if isinstance(e, dict) and e.get("enabled") is not False}
+    targets |= {m for _, _, members in combos for m in members}
+    targets = {t for t in targets if t.startswith("alsa_output.")}
+    if not targets:
+        return
+    ok, out = pactl("list", "sinks")
+    if not ok:
+        return
+    sinks, cur = {}, None
+    for line in out.splitlines():
+        t = line.strip()
+        if t.startswith("Name:"):
+            cur = sinks.setdefault(t[5:].strip(), {})
+        elif cur is None:
+            continue
+        elif t.startswith("Owner Module:"):
+            cur["module"] = t.split(":", 1)[1].strip()
+        elif t.startswith("Mute:"):
+            cur["mute"] = t.endswith("yes")
+        elif t.startswith("Volume:"):
+            cur["volume"] = t[7:].strip()
+            cur["raw"] = [int(v) for v in re.findall(r":\s*(\d+)\s*/", t)]
+        elif t.startswith("Base Volume:"):
+            m = re.match(r"Base Volume:\s*(\d+)", t)
+            cur["base"] = int(m.group(1)) if m else 65536
+    try:
+        done = json.loads(CARD_VOLUME_STATE.read_text())
+    except (OSError, ValueError):
+        done = {}
+    for name in sorted(targets):
+        info = sinks.get(name)
+        if not info or done.get(name) == info.get("module"):
+            continue
+        base = info.get("base", 65536)
+        was = []
+        if info.get("raw") and any(v != base for v in info["raw"]):
+            pct = round(100 * max(info["raw"]) / 65536)
+            was.append(f"was {pct}%")
+            ok1, err = pactl("set-sink-volume", name, str(base))
+            if not ok1:
+                log(f"card volume: setting {name} failed: {err}")
+                continue
+        if info.get("mute"):
+            was.append("was muted")
+            pactl("set-sink-mute", name, "0")
+        done[name] = info.get("module")
+        if was:
+            log(f"card volume: {name} set to its 0 dB point ({round(100 * base / 65536)}%)"
+                f"{' and unmuted' if info.get('mute') else ''} ({', '.join(was)})")
+    try:
+        CARD_VOLUME_STATE.write_text(json.dumps(done))
+    except OSError:
+        pass
+
+
 def main() -> int:
     # The web panel and the start-up hook may both run this; one at a time.
     lock = open(os.environ.get("RS_LOCK_FILE", "/tmp/remap_sinks.lock"), "w")
@@ -888,6 +957,7 @@ def main() -> int:
             if a == "--reload-combine" and i + 1 < len(argv):
                 forced |= {n.strip() for n in argv[i + 1].split(",") if n.strip()}
         apply_combines(combos, changed, forced)
+        apply_card_volumes(combos)
 
     if new == old:
         log(f"{CUSTOM_PA} unchanged")
