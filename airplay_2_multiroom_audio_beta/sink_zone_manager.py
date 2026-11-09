@@ -222,6 +222,7 @@ def all_sink_names():
 
 
 OPT_IN_FILE = Path(os.environ.get("SZM_OPT_IN_FILE", "/data/zones_opt_in"))
+PANEL_BUSY_FILE = Path(os.environ.get("SZM_PANEL_BUSY_FILE", "/tmp/airplay2_panel_busy"))
 
 
 class _AllBut:
@@ -698,6 +699,15 @@ class Manager:
         if sinks is None:
             return
         cards = {n for n in sinks if n.startswith("alsa_output.")}
+        try:
+            # The web panel is switching a card profile (or just did): it
+            # saves the options and runs --load itself. Running --load now,
+            # from the old options, would switch the profile back. Check
+            # again once the panel is done (prev_cards is left as it was).
+            if time.time() - float(PANEL_BUSY_FILE.read_text()) < 20:
+                return
+        except (OSError, ValueError):
+            pass
         prev, self.prev_cards = self.prev_cards, cards
         if prev is None or not (cards - prev):
             return
