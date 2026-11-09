@@ -1572,9 +1572,9 @@ def render(st: dict) -> str:
         if not cast:
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
-                f'<div style="flex:1 1 140px"><label>Max volume (dB)</label>'
-                f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div>'
-                f'<div style="display:flex;gap:0;align-items:flex-end">{more_actions}</div></div>'
+                f'<div style="display:flex;gap:0;align-items:flex-end">{more_actions}</div>'
+                f'<div style="flex:0 0 160px"><label>Max volume (dB)</label>'
+                f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div></div>'
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">Max volume saves with Apply.</p></td></tr>')
 
     card_order = {c["name"]: i for i, c in enumerate(st["cards"])}
