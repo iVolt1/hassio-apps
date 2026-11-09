@@ -40,9 +40,8 @@ one already owns. This script's own separate HTTP stream
 ports are tracked in a small file of their own
 (${CASTBRIDGE_DIR}/http_port_map.txt), since nothing else needs those.
 
-Discovery happens once at this service's own startup (i.e. once per
-addon restart), same as before. Add a new Cast device -> restart this
-addon to pick it up.
+Discovery keeps listening while this service runs (see Discovery): a Cast
+device that appears or changes address is picked up without a restart.
 """
 
 import fcntl
@@ -55,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pychromecast
@@ -100,10 +100,9 @@ def shairport_verbosity() -> str:
     return "-" + level if level in ("v", "vv", "vvv") else "-vv"
 DISCOVERY_TIMEOUT_SECONDS = int(os.environ.get("CAST_DISCOVERY_TIMEOUT", "10"))
 
-# How long to listen for existing _airplay._tcp mDNS advertisers before
-# deciding which Cast devices already have native AirPlay 2 (see
-# discover_airplay2_names() below). Matches DISCOVERY_TIMEOUT_SECONDS's
-# default rather than adding another knob to tune.
+# A Cast device seen after start waits this long before it is bridged, so
+# its own _airplay._tcp advertisement (if it has native AirPlay 2) has
+# arrived and it can be left alone (see Discovery below).
 AIRPLAY2_MDNS_TYPE = "_airplay._tcp.local."
 AIRPLAY2_PROBE_SECONDS = 5.0
 
@@ -114,10 +113,6 @@ SHAIRPORT_PORT_BASE = 5150
 UDP_PORT_BASE = 6800
 HTTP_PORT_BASE = 8090
 SUPERVISE_INTERVAL_SECONDS = 10
-# Cast devices are looked for again this often, in the background, so a
-# device added to the network (or one that was off at start) gets picked up
-# without restarting the add-on. 0 = only at start.
-REDISCOVER_SECONDS = int(os.environ.get("CAST_REDISCOVER_SECONDS", "5"))
 
 # shairport-sync's own documented AirPlay 2 defaults (per its
 # reference config: "Default is 48000 for AirPlay 2" / "Default is
@@ -237,51 +232,60 @@ class _AirPlay2NameCollector(zeroconf_lib.ServiceListener):
         pass
 
 
-def discover_airplay2_names(timeout: float = AIRPLAY2_PROBE_SECONDS) -> set:
-    """Briefly browses mDNS for existing _airplay._tcp advertisers and
-    returns their instance names, lowercased. Called once, before this
-    script spawns any of its own shairport-sync bridge instances, so it
-    only ever sees AirPlay 2 receivers this script didn't itself create
-    -- built-in TV/soundbar firmware and the separate PulseAudio-sink
-    zones from generate_airplay2_services.sh, not this run's own bridge
-    zones (those don't exist yet at this point in main()).
-    """
-    zc = zeroconf_lib.Zeroconf()
-    collector = _AirPlay2NameCollector()
-    browser = zeroconf_lib.ServiceBrowser(zc, AIRPLAY2_MDNS_TYPE, collector)
-    try:
-        time.sleep(timeout)
-    finally:
-        browser.cancel()
-        zc.close()
-    return collector.names
+class Discovery:
+    """Listens for Cast devices and AirPlay receivers for as long as the
+    manager runs (one zeroconf instance, no polling): a Cast device that
+    appears or moves wakes the main loop within a moment.
 
+    A Cast device whose friendly name is also advertised as an AirPlay
+    receiver already has native AirPlay 2 (or a sink zone of this add-on
+    has its name) and gets no bridge. The bridges this manager starts
+    advertise too, so their own names are ignored for that check."""
 
-def discover_chromecasts(quiet: bool = False):
-    say = log.debug if quiet else log.info
-    say("Discovering Cast devices (up to %ds)...", DISCOVERY_TIMEOUT_SECONDS)
-    casts, browser = pychromecast.get_chromecasts(timeout=DISCOVERY_TIMEOUT_SECONDS)
-    pychromecast.discovery.stop_discovery(browser)
+    def __init__(self):
+        self.zc = zeroconf_lib.Zeroconf()
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.seen = {}   # uuid -> [CastInfo, first seen (monotonic)]
+        self.airplay = _AirPlay2NameCollector()
+        self.ap_browser = zeroconf_lib.ServiceBrowser(self.zc, AIRPLAY2_MDNS_TYPE, self.airplay)
+        listener = pychromecast.discovery.SimpleCastListener(self._cast, None, self._cast)
+        self.browser = pychromecast.discovery.CastBrowser(listener, self.zc)
+        self.browser.start_discovery()
 
-    say("Probing for existing AirPlay 2 receivers (up to %.0fs)...", AIRPLAY2_PROBE_SECONDS)
-    airplay2_names = discover_airplay2_names()
+    def _cast(self, uuid, _service=None):
+        info = self.browser.devices.get(uuid)
+        if info is None or not info.friendly_name or not info.host:
+            return
+        with self.lock:
+            prev = self.seen.get(uuid)
+            self.seen[uuid] = [info, prev[1] if prev else time.monotonic()]
+        self.wake.set()
 
-    if airplay2_names:
-        kept = []
-        for c in casts:
-            if c.cast_info.friendly_name.strip().lower() in airplay2_names:
-                say("Excluding '%s' from Cast Bridge (already advertising its own "
-                         "AirPlay 2 receiver)", c.cast_info.friendly_name)
-            else:
-                kept.append(c)
-        casts = kept
+    def ready(self, settle: float):
+        """(Cast devices seen at least settle seconds ago, wrapped as
+        objects with .cast_info; how many are still settling)."""
+        now = time.monotonic()
+        with self.lock:
+            items = list(self.seen.values())
+        done = [types.SimpleNamespace(cast_info=i) for i, t in items if now - t >= settle]
+        return done, len(items) - len(done)
 
-    if casts:
-        say("Found %d Cast device(s): %s", len(casts),
-                  ", ".join(c.cast_info.friendly_name for c in casts))
-    elif not quiet:
-        log.warning("No Cast devices found on this discovery pass.")
-    return casts
+    def has_airplay2(self, friendly: str, own: set) -> bool:
+        n = friendly.strip().lower()
+        try:
+            names = set(self.airplay.names)
+        except RuntimeError:   # changed size while copying; next pass sees it
+            return False
+        return n in names and n not in own
+
+    def close(self):
+        try:
+            self.browser.stop_discovery()
+            self.ap_browser.cancel()
+            self.zc.close()
+        except Exception:
+            pass
 
 
 _logs_opened = set()
@@ -380,8 +384,36 @@ def main():
     CASTBRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
 
-    casts = discover_chromecasts()
-    devices = {safe_name(c.cast_info.friendly_name): c for c in casts}
+    disc = Discovery()
+    log.info("Discovering Cast devices (%ds), then listening for new ones...",
+             DISCOVERY_TIMEOUT_SECONDS)
+    time.sleep(DISCOVERY_TIMEOUT_SECONDS)
+    devices = {}     # safe_name -> object with .cast_info, bridged or bridgeable
+    excluded = set()  # safe names left alone (native AirPlay 2)
+
+    def consider(found, own):
+        """Sorts newly seen devices into devices / excluded; returns the new names."""
+        new = []
+        for c in found:
+            name = safe_name(c.cast_info.friendly_name)
+            if name in devices or name in excluded:
+                continue
+            if disc.has_airplay2(c.cast_info.friendly_name, own):
+                excluded.add(name)
+                log.info("Excluding '%s' from Cast Bridge (already advertising its own "
+                         "AirPlay 2 receiver)", c.cast_info.friendly_name)
+                continue
+            devices[name] = c
+            new.append(name)
+        return new
+
+    first, _ = disc.ready(0)
+    consider(first, set())
+    if devices:
+        log.info("Found %d Cast device(s): %s", len(devices),
+                 ", ".join(c.cast_info.friendly_name for c in devices.values()))
+    else:
+        log.warning("No Cast devices found yet; still listening for them.")
 
     def publish_devices():
         # The web panel lists these, so a Cast zone that is off can be switched on.
@@ -390,24 +422,6 @@ def main():
                                    for k, c in devices.items()]))
         os.replace(tmp, DISCOVERED_FILE)
     publish_devices()
-
-    # Background rediscovery: the thread only finds devices; the main loop
-    # below acts on what it found (found[0] is the latest list, or None).
-    found = [None]
-    found_lock = threading.Lock()
-
-    def rediscover():
-        while True:
-            time.sleep(REDISCOVER_SECONDS)
-            try:
-                result = discover_chromecasts(quiet=True)
-            except Exception as e:  # pychromecast/zeroconf hiccups must not kill the thread
-                log.warning("Cast rediscovery failed: %s", e)
-                continue
-            with found_lock:
-                found[0] = result
-    if REDISCOVER_SECONDS > 0:
-        threading.Thread(target=rediscover, daemon=True, name="cast-rediscover").start()
 
     zones = {}  # safe_name -> {"shairport": Popen, "bridge": Popen, "zone": dict, "sp_port": int, "udp_base": int}
     udp_bases = {}
@@ -465,27 +479,25 @@ def main():
         log.info("Cast zone(s) switched off, not starting: %s", ", ".join(off))
     start_zones([n for n in devices if wanted(n)])
 
-    if not devices:
-        log.warning("No Cast devices to bridge. Idling — restart this addon after your "
-                     "Cast devices are reachable on the network to pick them up.")
-
     log.info("All zones started (%d). Supervising.", len(zones))
 
     mtime = options_mtime()
     try:
         while True:
-            time.sleep(SUPERVISE_INTERVAL_SECONDS)
-            with found_lock:
-                latest, found[0] = found[0], None
-            if latest is not None:
-                new = []
-                for c in latest:
+            found, settling = disc.ready(AIRPLAY2_PROBE_SECONDS)
+            # Wake on a discovery event, or soon if a device is still settling.
+            disc.wake.wait(2 if settling else SUPERVISE_INTERVAL_SECONDS)
+            disc.wake.clear()
+            found, _ = disc.ready(AIRPLAY2_PROBE_SECONDS)
+            if found:
+                new = consider(found, {n.lower() for n in zones})
+                for c in found:
                     name = safe_name(c.cast_info.friendly_name)
                     old = devices.get(name)
+                    if old is None or name in new:
+                        continue
                     devices[name] = c
-                    if old is None:
-                        new.append(name)
-                    elif name in zones and (old.cast_info.host, old.cast_info.port) != \
+                    if name in zones and (old.cast_info.host, old.cast_info.port) != \
                             (c.cast_info.host, c.cast_info.port):
                         # Same device at a new address: point its bridge there.
                         log.info("Cast device '%s' moved to %s:%s; restarting its bridge",
@@ -528,6 +540,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        disc.close()
         for entry in zones.values():
             entry["shairport"].terminate()
             entry["bridge"].terminate()
