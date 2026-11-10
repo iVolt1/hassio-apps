@@ -40,7 +40,9 @@ Stop it with Ctrl-C.
 """
 
 import argparse
+import array
 import collections
+import math
 import os
 import signal
 import struct
@@ -71,7 +73,7 @@ def mono_to_unix_ms(play_ns: int) -> float:
 class Sender:
     """One cliairplay --protocol raop session (connect .. STOP)."""
 
-    def __init__(self, ip, port, txt, verbose):
+    def __init__(self, ip, port, txt, verbose, from_host=False):
         self.events = collections.defaultdict(threading.Event)
         self.started = {}
         self.verbose = verbose
@@ -85,6 +87,10 @@ class Sender:
             if txt.get(k):
                 cmd += [f"--{k}", txt[k]]
         cmd += ["--cmdpipe", self.pipe, ip]
+        if from_host:
+            # Send from the host's address instead of the zones' own: run
+            # cliairplay in PID 1's network namespace (the add-on's host network).
+            cmd = ["nsenter", "-t", "1", "-n", "--"] + cmd
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
         for s in (self.proc.stdout, self.proc.stderr):
@@ -161,6 +167,7 @@ class Bridge:
         self.skip = 0                      # frames still to skip (a backwards jump)
         self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
+        self.peak = 0                      # loudest sample since the last report
         self.last_report = time.time()
 
     # -- records from shairport-sync -------------------------------------------------
@@ -195,10 +202,15 @@ class Bridge:
             return                          # silence before anything timed: skip
         self.queue.append((play_ns if flags & TIMED else None, audio))
         self.idle_since = None
-        if self.sender is None or not self.sender.alive():
+        if self.sender is not None and not self.sender.alive():
+            say("the AirPlay 1 device closed the connection; reconnecting")
+            self.sender.stop()               # tidy up the old one
+            self.sender = None
+        if self.sender is None:
             say("audio arriving: connecting to the AirPlay 1 device")
             try:
-                self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose)
+                self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose,
+                                     getattr(self.a, "send_from_host", False))
             except RuntimeError as e:
                 say(f"  {e}; dropping this session's audio")
                 self.queue.clear()
@@ -291,6 +303,10 @@ class Bridge:
             elif err < -DEADBAND_MS and frames > 1:
                 audio = audio[BPF:]           # one frame dropped: the rest plays a frame earlier
                 self.stats["dropped"] += 1
+        if audio:
+            a16 = array.array("h", audio[:len(audio) // 2 * 2])
+            if a16:
+                self.peak = max(self.peak, max(a16), -min(a16))
         if self.skip and audio:
             k = min(self.skip, len(audio) // BPF)
             audio = audio[k * BPF:]
@@ -304,7 +320,10 @@ class Bridge:
         if time.time() - self.last_report >= 10:
             self.last_report = time.time()
             s = self.stats
-            say(f"in step: error {s['err']:+.2f} ms, lead {s['lead']:.0f} ms, "
+            level = (f"{20 * math.log10(self.peak / 32768):.0f} dBFS" if self.peak
+                     else "silence (check the player's volume in the sender)")
+            self.peak = 0
+            say(f"in step: error {s['err']:+.2f} ms, lead {s['lead']:.0f} ms, level {level}, "
                 f"frames added {s['added']} dropped {s['dropped']}, "
                 f"gaps {s['gaps']} ({s['gap_ms']:.0f} ms), restarts {s['resyncs']}")
 
@@ -328,6 +347,8 @@ def main() -> int:
     ap.add_argument("--raop-port", type=int)
     ap.add_argument("--min-lead", type=int, default=300)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--send-from-host", action="store_true",
+                    help="send the AirPlay 1 stream from the host's IP, not the zones' own")
     ap.add_argument("--linger", type=int, default=300,
                     help="seconds to keep the AirPlay 1 connection open after a session ends")
     ap.add_argument("--warmup", type=int, default=3000,

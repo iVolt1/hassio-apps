@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.154)
+- `ap1_bridge.py`: the 10 s status line shows the audio level the bridge passes on
+  (dBFS, or "silence"), to tell a silent device from a muted sender; and when the device
+  drops an idle connection (TuneAero does), the old connection is tidied up before
+  reconnecting (no `BrokenPipeError` traceback).
+- `ap1_bridge.py --send-from-host`: sends the AirPlay 1 stream from the host's address
+  while the AirPlay 2 receiver stays with the zones (to compare the two addresses).
+
 ### Fixed
 - `ap1_test.py` / `ap1_bridge.py`: the mDNS lookup waited only 3 s, too short for slower
   responders (TuneAero on Windows), so the device wasn't found and the port fell back to
