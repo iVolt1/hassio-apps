@@ -71,6 +71,9 @@ RATE, BPF = 44100, 4                  # S16_LE stereo, what cliairplay takes by 
 DEADBAND_MS = 1.0                     # drift corrected a frame at a time beyond this
 GAP_MS = 5.0                          # a jump beyond this is filled / skipped at once
 RESYNC_MS = 2000.0                    # flush + start again beyond this
+QUIET_WIN = 220                       # frames (5 ms) per near-silence test
+QUIET_SPAN = 16                       # max-min of a window this small: near-silence (dither)
+QUIET_LOG_MS = (10, 3000)             # near-silent stretches of this length are logged
 
 
 def mono_to_unix_ms(play_ns: int) -> float:
@@ -326,6 +329,8 @@ class Bridge:
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
         self.peak = 0                      # loudest sample since the last report
         self.meta = None                   # Metadata, set by main()
+        self.quiet_from = None             # fed-frame index where near-silence began
+        self.heard = False                 # sound since the start (not a lead-in)
         self.last_report = time.time()
 
     # -- records from shairport-sync -------------------------------------------------
@@ -434,6 +439,7 @@ class Bridge:
             self.sender.wait("flushed", 5)
             return
         self.start_ms = float(t)              # the play time (before the device offset)
+        self.quiet_from, self.heard = None, False
         self.state = "playing"
         say(f"started in step: first block plays at {t} (in {lead:.0f} ms)"
             + (f", sent {self.a.offset:+d} ms early for the device's own delay"
@@ -491,6 +497,7 @@ class Bridge:
             k = min(self.skip, len(audio) // BPF)
             audio = audio[k * BPF:]
             self.skip -= k
+        self.check_quiet(audio)
         try:
             self.sender.write(audio)
             self.fed += len(audio) // BPF
@@ -507,6 +514,28 @@ class Bridge:
                 f"frames added {s['added']} dropped {s['dropped']}, "
                 f"gaps {s['gaps']} ({s['gap_ms']:.0f} ms), restarts {s['resyncs']}")
 
+
+    def check_quiet(self, audio):
+        """Log short near-silent stretches in the audio we pass on (with the
+        time they are heard), to tell gaps in the source from dropouts later on."""
+        a16 = array.array("h", audio[:len(audio) // BPF * BPF])
+        step = QUIET_WIN * 2
+        for i in range(0, len(a16), step):
+            w = a16[i:i + step]
+            quiet = max(w) - min(w) <= QUIET_SPAN
+            frame = self.fed + i // 2
+            if quiet:
+                if self.quiet_from is None:
+                    self.quiet_from = frame
+            else:
+                if self.quiet_from is not None and self.heard:
+                    ms = (frame - self.quiet_from) * 1000.0 / RATE
+                    if QUIET_LOG_MS[0] <= ms <= QUIET_LOG_MS[1]:
+                        at = (self.start_ms + self.quiet_from * 1000.0 / RATE) / 1000
+                        say(f"near-silence in the stream: {ms:.0f} ms, heard at "
+                            f"{time.strftime('%H:%M:%S', time.localtime(at))}"
+                            f".{int(at * 1000) % 1000:03d}")
+                self.quiet_from, self.heard = None, True
 
 def read_exact(f, n):
     buf = b""
