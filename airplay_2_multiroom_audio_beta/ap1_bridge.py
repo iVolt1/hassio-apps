@@ -26,6 +26,12 @@ A flush from the sender (seek, skip, pause) is passed on as a flush and a
 new start; the end of a play session stops cliairplay, so the device is
 free for other senders between sessions.
 
+Track metadata (title, artist, album, length, cover art, progress) comes
+from shairport-sync's metadata pipe and is passed on to the device through
+cliairplay's TITLE/ARTIST/ALBUM/DURATION/ARTWORKFILE/SENDMETA/PROGRESS
+commands; cliairplay sends only the kinds the device lists in its mDNS
+"md" field.
+
 Every few seconds it logs the current sync error and the corrections made.
 
 Options:
@@ -41,9 +47,11 @@ Stop it with Ctrl-C.
 
 import argparse
 import array
+import base64
 import collections
 import math
 import os
+import re
 import signal
 import struct
 import subprocess
@@ -160,6 +168,148 @@ class Sender:
                 pass
 
 
+class Metadata:
+    """Track metadata from shairport-sync's metadata pipe, passed on to cliairplay.
+
+    Reads the pipe's <item> records (type/code as hex, data base64): title,
+    artist, album, song length, cover art and progress. Changes are pushed
+    as one bundle (TITLE/ARTIST/ALBUM/DURATION, ARTWORKFILE, ACTION=SENDMETA)
+    a moment after the last one arrives, and again whenever the AirPlay 1
+    stream (re)starts; progress (PROGRESS=) after each bundle and on its own.
+    """
+
+    ITEM = re.compile(rb"<item><type>([0-9a-f]{8})</type><code>([0-9a-f]{8})</code>"
+                      rb"<length>(\d+)</length>(?:\s*<data encoding=\"base64\">\s*"
+                      rb"([^<]*)</data>)?\s*</item>")
+
+    def __init__(self, fifo, work, lock, bridge_ref):
+        self.fifo, self.work, self.lock, self.bridge = fifo, work, lock, bridge_ref
+        self.title = self.artist = self.album = ""
+        self.duration = 0                    # s
+        self.progress = None                 # (start, curr, end) RTP
+        self.progress_at = 0.0
+        self.art = None                      # path of the current cover, or None
+        self.art_n = 0
+        self.dirty_at = None                 # when the last change came in
+        self.sent = None                     # what the device has now
+        self.sent_sender = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    # -- reading ----------------------------------------------------------------------
+    def _run(self):
+        while True:
+            try:
+                with open(self.fifo, "rb", buffering=0) as f:
+                    buf = b""
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while True:
+                            m = self.ITEM.search(buf)
+                            if not m:
+                                # Keep a partial item; drop anything before it.
+                                i = buf.rfind(b"<item>")
+                                buf = buf[i:] if i >= 0 else b""
+                                break
+                            buf = buf[m.end():]
+                            data = base64.b64decode(m.group(4)) if m.group(4) else b""
+                            with self.lock:
+                                self._item(bytes.fromhex(m.group(1).decode()),
+                                           bytes.fromhex(m.group(2).decode()), data)
+            except Exception as e:                # keep going whatever arrives
+                say(f"metadata pipe: {e}")
+                time.sleep(1)
+
+    def _item(self, typ, code, data):
+        changed = False
+        if typ == b"core":
+            text = data.decode(errors="replace")
+            field = {b"minm": "title", b"asar": "artist", b"asal": "album"}.get(code)
+            if field and getattr(self, field) != text:
+                setattr(self, field, text)
+                changed = True
+            elif code == b"astm" and len(data) == 4:
+                d = round(struct.unpack(">I", data)[0] / 1000)
+                if d != self.duration:
+                    self.duration, changed = d, True
+        elif typ == b"ssnc":
+            if code == b"PICT":
+                self.art_n += 1
+                if data:
+                    ext = "png" if data[:4] == b"\x89PNG" else "jpg"
+                    path = os.path.join(self.work, f"cover{self.art_n % 2}.{ext}")
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    self.art = path
+                else:
+                    self.art = None
+                changed = True
+            elif code == b"prgr":
+                try:
+                    self.progress = tuple(int(x) for x in data.decode().split("/"))
+                    self.progress_at = time.time()
+                    self.push_progress()
+                except ValueError:
+                    pass
+            elif code == b"pend":                  # session over: start afresh next time
+                self.title = self.artist = self.album = ""
+                self.duration, self.progress, self.art, self.sent = 0, None, None, None
+        if changed:
+            self.dirty_at = time.time()
+
+    # -- sending (called with the lock held) ------------------------------------------
+    def _sender(self):
+        b = self.bridge()
+        s = b.sender if b else None
+        if s and s.alive() and s.events["connected"].is_set() and b.state == "playing":
+            return s
+        return None
+
+    def tick(self, s=None):
+        """Push a settled change, or everything to a new AirPlay 1 stream.
+        With s: to that sender now (before its START, so the device shows
+        the track rather than cliairplay's placeholder)."""
+        s = s or self._sender()
+        if not s:
+            return
+        if s is not self.sent_sender:
+            self.sent, self.sent_sender = None, s     # a new connection has nothing
+        if self.dirty_at and time.time() - self.dirty_at < 0.3:
+            return                                    # more of the bundle on its way
+        now = (self.title, self.artist, self.album, self.duration, self.art)
+        if now == self.sent or not any(now[:3]):
+            return
+        lines = [f"TITLE={self.title}", f"ARTIST={self.artist}", f"ALBUM={self.album}",
+                 f"DURATION={self.duration}"]
+        if self.art != (self.sent[4] if self.sent else None):
+            lines.append(f"ARTWORKFILE={self.art or ''}")
+        try:
+            s.send(*(l.replace("\n", " ") for l in lines), "ACTION=SENDMETA")
+        except OSError:
+            return
+        self.sent, self.dirty_at = now, None
+        say(f"metadata: {self.title} / {self.artist} / {self.album}"
+            + (f" ({self.duration} s)" if self.duration else "")
+            + (", with cover art" if self.art else ""))
+        self.push_progress()
+
+    def push_progress(self):
+        s = self._sender()
+        if not (s and self.progress and self.sent):
+            return
+        start, curr, end = self.progress
+        pos = (curr - start) / RATE + (time.time() - self.progress_at)
+        dur = self.duration or round((end - start) / RATE)
+        if dur <= 0:
+            return
+        try:
+            s.send(f"DURATION={dur}", f"PROGRESS={max(0, min(dur, round(pos)))}")
+        except OSError:
+            pass
+
+
 class Bridge:
     def __init__(self, a, raop_port, txt):
         self.a, self.raop_port, self.txt = a, raop_port, txt
@@ -175,6 +325,7 @@ class Bridge:
         self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
         self.peak = 0                      # loudest sample since the last report
+        self.meta = None                   # Metadata, set by main()
         self.last_report = time.time()
 
     # -- records from shairport-sync -------------------------------------------------
@@ -267,6 +418,8 @@ class Bridge:
         # Our own accounting (start_ms) stays on the receiver's play times;
         # only what cliairplay is told moves by the device's offset.
         t_dev = t - getattr(self.a, "offset", 0)
+        if self.meta:
+            self.meta.tick(self.sender)
         self.sender.send(f"START_UNIX_MS={t_dev}", "ACTION=START")
         self.sender.wait("started", 5)
         st = self.sender.started
@@ -431,6 +584,8 @@ def main() -> int:
     work = tempfile.mkdtemp(prefix="ap1bridge-sps-")
     fifo = os.path.join(work, "audio")
     os.mkfifo(fifo)
+    mfifo = os.path.join(work, "metadata")
+    os.mkfifo(mfifo)
     iface = 'interface = "ap2mv";' if os.environ.get("AP1_BRIDGE_IN_NS") else ""
     conf = os.path.join(work, "sps.conf")
     with open(conf, "w") as f:
@@ -451,6 +606,11 @@ pipe = {{
   output_rate = {RATE};
   output_format = "S16_LE";
 }};
+metadata = {{
+  enabled = "yes";
+  include_cover_art = "yes";
+  pipe_name = "{mfifo}";
+}};
 """)
     sps = subprocess.Popen(["shairport-sync-ap1bridge", "-c", conf] + (["-v"] if a.verbose else []),
                            stdout=None if a.verbose else subprocess.DEVNULL,
@@ -460,12 +620,18 @@ pipe = {{
 
     bridge = Bridge(a, raop_port, txt)
     lock = threading.Lock()
+    meta = Metadata(mfifo, work, lock, lambda: bridge)
+    bridge.meta = meta
 
     def idle_timer():
+        n = 0
         while True:
-            time.sleep(1)
+            time.sleep(0.25)
+            n += 1
             with lock:
-                bridge.tick()
+                meta.tick()
+                if n % 4 == 0:
+                    bridge.tick()
     threading.Thread(target=idle_timer, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:

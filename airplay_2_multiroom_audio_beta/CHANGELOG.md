@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.162)
+- **Track info on AirPlay 1 devices.** The AirPlay 1 bridge now passes on what's
+  playing: title, artist, album, track length, cover art and progress, taken from
+  the bridged player's shairport-sync metadata and sent to the device with each new
+  track (and whenever the AirPlay 1 stream starts again). Devices show what they
+  support (TuneAero on its screen, an ESPHome Echo Dot in Home Assistant). The
+  bridge log has a `metadata: title / artist / album` line for each track.
+
 ### Added (0.161)
 - **AirPlay 1 devices in the web panel (AirPlay 2 -> AirPlay 1 bridge).** A new service,
   `ap1_bridge_manager.py`, keeps listening for AirPlay 1-only devices on the network
