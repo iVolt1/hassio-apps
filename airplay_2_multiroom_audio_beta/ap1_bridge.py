@@ -73,7 +73,7 @@ def mono_to_unix_ms(play_ns: int) -> float:
 class Sender:
     """One cliairplay --protocol raop session (connect .. STOP)."""
 
-    def __init__(self, ip, port, txt, verbose):
+    def __init__(self, ip, port, txt, verbose, from_host=False):
         self.events = collections.defaultdict(threading.Event)
         self.started = {}
         self.verbose = verbose
@@ -87,6 +87,10 @@ class Sender:
             if txt.get(k):
                 cmd += [f"--{k}", txt[k]]
         cmd += ["--cmdpipe", self.pipe, ip]
+        if from_host:
+            # Send from the host's address instead of the zones' own: run
+            # cliairplay in PID 1's network namespace (the add-on's host network).
+            cmd = ["nsenter", "-t", "1", "-n", "--"] + cmd
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
         for s in (self.proc.stdout, self.proc.stderr):
@@ -205,7 +209,8 @@ class Bridge:
         if self.sender is None:
             say("audio arriving: connecting to the AirPlay 1 device")
             try:
-                self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose)
+                self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose,
+                                     getattr(self.a, "send_from_host", False))
             except RuntimeError as e:
                 say(f"  {e}; dropping this session's audio")
                 self.queue.clear()
@@ -342,6 +347,8 @@ def main() -> int:
     ap.add_argument("--raop-port", type=int)
     ap.add_argument("--min-lead", type=int, default=300)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--send-from-host", action="store_true",
+                    help="send the AirPlay 1 stream from the host's IP, not the zones' own")
     ap.add_argument("--linger", type=int, default=300,
                     help="seconds to keep the AirPlay 1 connection open after a session ends")
     ap.add_argument("--warmup", type=int, default=3000,

@@ -17,6 +17,8 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
   (dBFS, or "silence"), to tell a silent device from a muted sender; and when the device
   drops an idle connection (TuneAero does), the old connection is tidied up before
   reconnecting (no `BrokenPipeError` traceback).
+- `ap1_bridge.py --send-from-host`: sends the AirPlay 1 stream from the host's address
+  while the AirPlay 2 receiver stays with the zones (to compare the two addresses).
 
 ### Changed
 - `ap1_bridge.py` and `ap1_test.py` take the device's AirPlay name instead of an IP
