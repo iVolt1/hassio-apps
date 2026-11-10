@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.156)
+- cliairplay is built with a small patch: `CLIAIRPLAY_RAOP_LEAD_MS` sets its AirPlay 1
+  (RAOP) lead, fixed at 2000 ms upstream (the device is told that + 250 ms as its
+  latency). `ap1_bridge.py --raop-lead MS` uses it, to find how short a lead (and so
+  how small a `--buffer`, and how quick a volume change) each AirPlay 1 device takes.
+  The status lines show the latency cliairplay tells the device.
+
 ### Added (0.155)
 - `ap1_bridge.py --buffer SECONDS` (default 1.0): how far ahead of its play time the
   bridge's AirPlay 2 receiver passes audio on (its pipe output buffer, with the decoded
