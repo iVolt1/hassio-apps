@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.167)
+- **Sample rate and format moved to the sound card.** They are card settings, so they now
+  sit in each card's box under *Sound cards*, below its Profile: **Sample rate and format
+  (now 192 kHz · 24 bit)**, with Auto/44.1/48/96/192 kHz, Auto/16/24/32 bit and **Set**.
+  A zone's More panel no longer has them. What Set does is unchanged (0.165, 0.166).
+
 ### Added (0.166)
 - **Card format next to Card rate.** A sound-card zone's **More** now also has **Card
   format** (Auto, 16, 24 or 32 bit), with the format the card runs at now. **Set** applies

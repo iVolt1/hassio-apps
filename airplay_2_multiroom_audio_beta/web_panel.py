@@ -1569,8 +1569,8 @@ document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('cli
 document.querySelectorAll('button.kswitch').forEach(b => b.addEventListener('click', () =>
   post('api/combine/enabled', {index: Number(b.dataset.index), enabled: b.dataset.on === '1'}, 'kresult')));
 document.querySelectorAll('button.crate').forEach(b => b.addEventListener('click', () => {
-  const z = b.closest('.zform'), v = k => z.querySelector(`select.crate_sel[data-k="${k}"]`).value;
-  post('api/card/rate', {card: b.dataset.card, rate: v('rate'), format: v('format')});
+  const z = b.closest('.caudio'), v = k => z.querySelector(`select.crate_sel[data-k="${k}"]`).value;
+  post('api/card/rate', {card: b.dataset.card, rate: v('rate'), format: v('format')}, 'cresult');
 }));
 document.querySelectorAll('button.sdelete').forEach(b => b.addEventListener('click', () => {
   if (b.dataset.armed) { post('api/sink/delete', {index: Number(b.dataset.index)}); return; }
@@ -1648,6 +1648,34 @@ def render(st: dict) -> str:
         affected[pc["name"]] = [r["name"] + ("" if r["managed"] else " (unmanaged: will be lost)")
                                 for r in st["remap_sinks"] if r["master"].startswith(pre)]
     shown = set()
+    sink_specs = {x["name"]: x.get("sample_specification", "") for x in list_sinks() if "name" in x}
+    card_opts = load_options()
+
+    def audio_ctl(card, outputs):
+        """Sample rate / format selects for a sound card (module-alsa-card
+        rate= / format=), with what its output runs at now."""
+        if not card.startswith("alsa_card."):
+            return ""
+        rate_set, fmt_set = card_option(card_opts, card, "rate"), card_option(card_opts, card, "format")
+        spec = next((sink_specs[o] for o in outputs if sink_specs.get(o)), "")
+        now_rate = (re.search(r"(\d+)Hz", spec) or [None, ""])[1]
+        now_bits = (re.search(r"(\d+)", spec.split()[0]) or [None, ""])[1] if spec else ""
+        rsel = "".join(f'<option value="{r}"{" selected" if r == rate_set else ""}>{int(r) / 1000:g} kHz</option>'
+                       for r in CARD_RATES)
+        fsel = "".join(f'<option value="{f}"{" selected" if f == fmt_set else ""}>{lab}</option>'
+                       for f, lab in CARD_FORMATS.items())
+        now = " · ".join(x for x in ((f"{int(now_rate) / 1000:g} kHz" if now_rate else ""),
+                                      (f"{now_bits} bit" if now_bits else "")) if x)
+        return (f'<label class="sub" style="font-size:12px;margin-top:4px">Sample rate and format'
+                + (f' (now {now})' if now else "") + '</label>'
+                f'<div class="caudio" style="display:flex;gap:8px">'
+                f'<select class="crate_sel" data-k="rate" aria-label="Sample rate for {e(card)}" style="flex:1;min-width:0">'
+                f'<option value=""{" selected" if not rate_set else ""}>Auto rate</option>{rsel}</select>'
+                f'<select class="crate_sel" data-k="format" aria-label="Sample format for {e(card)}" style="flex:1;min-width:0">'
+                f'<option value=""{" selected" if not fmt_set else ""}>Auto format</option>{fsel}</select>'
+                f'<button class="btn sec sm crate" type="button" data-card="{e(card)}" style="margin:0" '
+                f'title="Reloads the card: every zone on it restarts">Set</button></div>')
+
     card_html = []
     for i, pc in enumerate(st["pa_cards"]):
         opts = "".join(
@@ -1672,6 +1700,7 @@ def render(st: dict) -> str:
             f'<div style="display:flex;gap:8px;margin-top:8px"><button class="btn pri sm cgo" type="button" '
             f'data-for="cp_{i}" style="margin:0">Switch profile</button><button class="btn sec sm cno" '
             f'type="button" style="margin:0">Cancel</button></div></div>'
+            + audio_ctl(pc["name"], pc["outputs"])
             + ("".join(outs) or '<div class="sub">No output with this profile</div>') + '</div>')
     # Sound-card sinks no PulseAudio card claims (unusual) still get shown.
     for c in st["cards"]:
@@ -1792,32 +1821,6 @@ def render(st: dict) -> str:
                 f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div></div>'
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">Max volume saves with Apply.</p></td></tr>')
 
-    sink_specs = {x["name"]: x.get("sample_specification", "") for x in list_sinks() if "name" in x}
-
-    def rate_ctl(master):
-        card = card_of_sink(master, st["pa_cards"])
-        if not card or not card.startswith("alsa_card."):
-            return ""
-        rate_set, fmt_set = card_option(opts, card, "rate"), card_option(opts, card, "format")
-        spec = sink_specs.get(master, "")
-        now_rate = (re.search(r"(\d+)Hz", spec) or [None, ""])[1]
-        now_fmt = spec.split()[0] if spec else ""
-        now_bits = (re.search(r"(\d+)", now_fmt) or [None, ""])[1]
-        rsel = "".join(f'<option value="{r}"{" selected" if r == rate_set else ""}>{int(r) / 1000:g} kHz</option>'
-                       for r in CARD_RATES)
-        fsel = "".join(f'<option value="{f}"{" selected" if f == fmt_set else ""}>{lab}</option>'
-                       for f, lab in CARD_FORMATS.items())
-        return (f'<div style="flex:0 0 auto;margin-left:14px"><label>Card rate'
-                + (f' (now {int(now_rate) / 1000:g} kHz)' if now_rate else "") + '</label>'
-                f'<select class="crate_sel" data-k="rate" aria-label="Sample rate for the card">'
-                f'<option value=""{" selected" if not rate_set else ""}>Auto</option>{rsel}</select></div>'
-                f'<div style="flex:0 0 auto;margin-left:10px"><label>Card format'
-                + (f' (now {now_bits} bit)' if now_bits else "") + '</label>'
-                f'<div style="display:flex;gap:6px"><select class="crate_sel" data-k="format" aria-label="Sample format for the card">'
-                f'<option value=""{" selected" if not fmt_set else ""}>Auto</option>{fsel}</select>'
-                f'<button class="btn sec sm crate" type="button" data-card="{e(card)}" '
-                f'title="Reloads the whole card: every zone on it restarts">Set</button></div></div>')
-
     card_order = {c["name"]: i for i, c in enumerate(st["cards"])}
     pair_order = {p: i for i, p in enumerate(PAIR_LABEL)}
     items = [("r", r, card_order.get(r["master"], 999), pair_order.get(r.get("pair", ""), 99), n)
@@ -1845,7 +1848,6 @@ def render(st: dict) -> str:
             acts = f'<button class="btn sec sm adopt" data-name="{e(r["name"])}">Adopt</button>'
         else:
             acts = f'<span class="sub" style="font-size:12px;margin-left:10px">Can\'t adopt: {e(r.get("adopt_note", ""))}</span>'
-        acts += rate_ctl(r["master"])
         player_row("remap", r["name"], r["name"], True, r["index"], r.get("enabled", True), managed,
                    r["channels"], r["master_description"] or r["master"], r["system_name"], status, acts,
                    "" if managed else "unmanaged")
@@ -1933,7 +1935,7 @@ def render(st: dict) -> str:
 <section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
 <section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
 <button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
-<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile restarts that card's zones.</p>
+<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format restarts that card's zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
 <section><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
 {combine_html}</section>
