@@ -53,7 +53,7 @@ def say(msg: str) -> None:
     print(f"{ts()}  {msg}", flush=True)
 
 
-def raop_service(ip: str, wait: float = 3.0):
+def raop_service(ip: str, wait: float = 8.0):
     """(port, TXT dict) of the _raop._tcp service at ip, or (None, {}).
     ip may also be the device's AirPlay name (or part of it, any case);
     TXT then has its address as "_addr"."""
@@ -125,6 +125,9 @@ def main() -> int:
     a = ap.parse_args()
 
     port, txt = raop_service(a.ip)
+    if not txt and not a.ip.replace(".", "").isdigit():
+        say(f"no AirPlay 1 device called '{a.ip}' found over mDNS")
+        return 1
     a.ip = txt.get("_addr", a.ip)
     port = a.port or port or 5000
     cmd = ["cliairplay", "--protocol", "raop", "--port", str(port),

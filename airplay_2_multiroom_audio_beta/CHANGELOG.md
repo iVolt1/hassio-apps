@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- `ap1_test.py` / `ap1_bridge.py`: the mDNS lookup waited only 3 s, too short for slower
+  responders (TuneAero on Windows), so the device wasn't found and the port fell back to
+  5000. It now waits up to 8 s (returning as soon as the device answers), and
+  `ap1_test.py` stops with a message when a name isn't found.
+
 ### Changed
 - `ap1_bridge.py` and `ap1_test.py` take the device's AirPlay name instead of an IP
   (`ap1_bridge.py "BA 790 TA"`); it is looked up over mDNS (any case, part of the name
