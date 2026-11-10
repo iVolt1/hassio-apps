@@ -6,11 +6,24 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- AirPlay 2 -> AirPlay 1 bridge, step 2a (run by hand, one device):
+  `docker exec -it app_2c14ac29_airplay_2_multiroom_audio_beta python3 /usr/sbin/ap1_bridge.py <device ip> [--name "..."]`
+  starts an AirPlay 2 receiver whose audio is passed on to the AirPlay 1 device with
+  cliairplay, started and kept at the play times the receiver gets from the AirPlay 2
+  group, so the device plays in step with your other rooms. It uses a second
+  shairport-sync build, `shairport-sync-ap1bridge`, from the unmerged
+  mikebrady/shairport-sync#2334 (timing headers on the pipe output), pinned to a
+  commit; every other zone keeps the 5.6.2 build. Drift is corrected a frame at a
+  time; a flush from the sender, or a large error, restarts the stream at the next
+  block. Logs the sync error every 10 s.
+- `ap1_test.py` exits quietly on Ctrl-C.
+
+### Added
 - Groundwork for an AirPlay 2 -> AirPlay 1 bridge: the image now includes **cliairplay**
   (Music Assistant's AirPlay 1/2 sender, v0.5.9, built fully static) and a test tool,
   `ap1_test.py`, that streams a wall-clock click track to an AirPlay 1 device and
   exercises start-at-an-instant, flush/re-anchor, volume and stop. Run by hand:
-  `docker exec -it addon_2c14ac29_airplay_2_multiroom_audio_beta python3 /usr/sbin/ap1_test.py <device ip>`.
+  `docker exec -it app_2c14ac29_airplay_2_multiroom_audio_beta python3 /usr/sbin/ap1_test.py <device ip>`.
   Nothing runs it automatically.
 
 ### Changed
