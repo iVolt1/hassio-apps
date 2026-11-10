@@ -368,6 +368,12 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=3000,
                     help="ms after a new connection before the device joins")
     a = ap.parse_args()
+    if a.raop_lead:
+        # cliairplay tells the device its latency is the RAOP lead + 250 ms.
+        # Some devices (TuneAero) play nothing sooner than that after it
+        # arrives, so a start with less lead plays late, and stays late on
+        # the same connection: never start with less.
+        a.min_lead = max(a.min_lead, a.raop_lead + 250 + 50)
 
     # The add-on's AirPlay 2 receivers live in the "ap2" network namespace
     # (their own IP); run there too when it exists.

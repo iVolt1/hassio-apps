@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.157)
+- AirPlay 1 bridge: with `--raop-lead`, a stream is never started with less lead than
+  the latency cliairplay gives the device (lead + 250 ms, +50 ms margin). TuneAero plays
+  nothing sooner than that after it arrives, so an iPhone session (little lead at first)
+  started it ~450 ms late, and it stayed late on the reused connection. The bridge now
+  skips the first fraction of a second instead.
+
 ### Added (0.156)
 - cliairplay is built with a small patch: `CLIAIRPLAY_RAOP_LEAD_MS` sets its AirPlay 1
   (RAOP) lead, fixed at 2000 ms upstream (the device is told that + 250 ms as its
