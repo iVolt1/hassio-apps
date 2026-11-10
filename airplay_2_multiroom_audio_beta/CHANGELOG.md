@@ -5,6 +5,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `ap1_bridge.py` and `ap1_test.py` take the device's AirPlay name instead of an IP
+  (`ap1_bridge.py "BA 790 TA"`); it is looked up over mDNS (any case, part of the name
+  is enough) and gives the address, port and settings.
+
 ### Fixed
 - Version 0.151 (0.150 would read as 0.15).
 - AirPlay 1 bridge (`ap1_bridge.py`): the network namespace check looked for a file

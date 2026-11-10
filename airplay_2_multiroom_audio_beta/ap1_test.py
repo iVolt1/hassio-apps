@@ -54,7 +54,9 @@ def say(msg: str) -> None:
 
 
 def raop_service(ip: str, wait: float = 3.0):
-    """(port, TXT dict) of the _raop._tcp service at ip, or (None, {})."""
+    """(port, TXT dict) of the _raop._tcp service at ip, or (None, {}).
+    ip may also be the device's AirPlay name (or part of it, any case);
+    TXT then has its address as "_addr"."""
     try:
         from zeroconf import ServiceBrowser, Zeroconf
     except ImportError:
@@ -64,8 +66,13 @@ def raop_service(ip: str, wait: float = 3.0):
     class L:
         def add_service(self, zc, type_, name):
             info = zc.get_service_info(type_, name, timeout=2000)
-            if info and ip in info.parsed_addresses():
+            friendly = name.split("@", 1)[-1].split("._raop")[0]
+            if info and (ip in info.parsed_addresses()
+                         or ip.lower() in friendly.lower()
+                         or ip.lower().replace(" ", "_") in friendly.lower()):
                 txt = {k.decode(): (v.decode() if v else "") for k, v in info.properties.items()}
+                v4 = [a for a in info.parsed_addresses() if ":" not in a]
+                txt["_addr"] = (v4 or info.parsed_addresses())[0]
                 found["svc"] = (info.port, txt, name)
 
         def update_service(self, *a):
@@ -118,6 +125,7 @@ def main() -> int:
     a = ap.parse_args()
 
     port, txt = raop_service(a.ip)
+    a.ip = txt.get("_addr", a.ip)
     port = a.port or port or 5000
     cmd = ["cliairplay", "--protocol", "raop", "--port", str(port),
            "--volume", str(a.volume), "--debug", str(a.debug)]
