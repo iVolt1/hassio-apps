@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.158)
+- `ap1_bridge.py --offset MS`: for an AirPlay 1 device that plays late by itself (its own
+  output delay; TuneAero on Windows: about 1/3 s), the stream is started that much
+  earlier so it lands in step. Negative for a device that plays early. The bridge's sync
+  accounting stays on the receiver's play times.
+
 ### Fixed (0.157)
 - AirPlay 1 bridge: with `--raop-lead`, a stream is never started with less lead than
   the latency cliairplay gives the device (lead + 250 ms, +50 ms margin). TuneAero plays
