@@ -230,7 +230,11 @@ class Bridge:
         # before the device's clock has had time to sync to ours after a new
         # connection (AirPlay 1 timing settles over the first exchanges).
         now = time.time() * 1000
-        not_before = max(now + self.min_lead, self.sender.connected_at * 1000 + self.a.warmup)
+        # A device that plays late by --offset ms is started that much earlier,
+        # so the block needs that much more lead.
+        early = max(0, getattr(self.a, "offset", 0))
+        not_before = max(now + self.min_lead + early,
+                         self.sender.connected_at * 1000 + self.a.warmup)
         while self.queue:
             p, _ = self.queue[0]
             if p is not None and mono_to_unix_ms(p) >= not_before:
@@ -249,7 +253,10 @@ class Bridge:
         self.sender.proc.stdin.flush()
         self.sender.wait("audio", 0.5)    # sent once a packet is buffered: at once
         t = round(self.start_ms)
-        self.sender.send(f"START_UNIX_MS={t}", "ACTION=START")
+        # Our own accounting (start_ms) stays on the receiver's play times;
+        # only what cliairplay is told moves by the device's offset.
+        t_dev = t - getattr(self.a, "offset", 0)
+        self.sender.send(f"START_UNIX_MS={t_dev}", "ACTION=START")
         self.sender.wait("started", 5)
         st = self.sender.started
         lead = self.start_ms - time.time() * 1000
@@ -262,9 +269,11 @@ class Bridge:
             self.sender.send("ACTION=FLUSH")
             self.sender.wait("flushed", 5)
             return
-        self.start_ms += (t - self.start_ms)  # what cliairplay was told
+        self.start_ms = float(t)              # the play time (before the device offset)
         self.state = "playing"
-        say(f"started in step: first block plays at {t} (in {lead:.0f} ms)")
+        say(f"started in step: first block plays at {t} (in {lead:.0f} ms)"
+            + (f", sent {self.a.offset:+d} ms early for the device's own delay"
+               if getattr(self.a, "offset", 0) else ""))
 
     def tick(self):
         """Closes the AirPlay 1 connection after --linger seconds idle."""
@@ -363,6 +372,9 @@ def main() -> int:
     ap.add_argument("--raop-lead", type=int, default=0,
                     help="ms the AirPlay 1 stream is sent ahead (cliairplay's RAOP lead; "
                          "default 2000, the device is told this + 250 ms as its latency)")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="ms the device plays late by itself (its own output delay); "
+                         "the stream is started that much earlier. Negative: plays early")
     ap.add_argument("--linger", type=int, default=300,
                     help="seconds to keep the AirPlay 1 connection open after a session ends")
     ap.add_argument("--warmup", type=int, default=3000,
