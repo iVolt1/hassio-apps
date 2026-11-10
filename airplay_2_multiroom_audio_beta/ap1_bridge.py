@@ -73,7 +73,7 @@ def mono_to_unix_ms(play_ns: int) -> float:
 class Sender:
     """One cliairplay --protocol raop session (connect .. STOP)."""
 
-    def __init__(self, ip, port, txt, verbose, from_host=False):
+    def __init__(self, ip, port, txt, verbose, from_host=False, raop_lead=0):
         self.events = collections.defaultdict(threading.Event)
         self.started = {}
         self.verbose = verbose
@@ -91,8 +91,11 @@ class Sender:
             # Send from the host's address instead of the zones' own: run
             # cliairplay in PID 1's network namespace (the add-on's host network).
             cmd = ["nsenter", "-t", "1", "-n", "--"] + cmd
+        env = dict(os.environ)
+        if raop_lead:
+            env["CLIAIRPLAY_RAOP_LEAD_MS"] = str(raop_lead)   # patched cliairplay
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE)
+                                     stderr=subprocess.PIPE, env=env)
         for s in (self.proc.stdout, self.proc.stderr):
             threading.Thread(target=self._read, args=(s,), daemon=True).start()
         fd = None
@@ -110,6 +113,9 @@ class Sender:
         for raw in stream:
             line = raw.decode(errors="replace").rstrip()
             if "playing elapsed_ms" in line:
+                continue
+            if "player latency is" in line:
+                say(f"  cliairplay: {line.split('] ', 2)[-1]}")
                 continue
             if ("[STATUS]" in line or "[ERROR]" in line or "error" in line.lower()
                     or (self.verbose and any(w in line.lower()
@@ -210,7 +216,8 @@ class Bridge:
             say("audio arriving: connecting to the AirPlay 1 device")
             try:
                 self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose,
-                                     getattr(self.a, "send_from_host", False))
+                                     getattr(self.a, "send_from_host", False),
+                                     getattr(self.a, "raop_lead", 0))
             except RuntimeError as e:
                 say(f"  {e}; dropping this session's audio")
                 self.queue.clear()
@@ -353,6 +360,9 @@ def main() -> int:
                     help="seconds of audio the receiver passes on ahead of its play time "
                          "(the most lead a start can get; AirPlay 1 devices that report a "
                          "long latency, e.g. TuneAero 2250 ms, may need more)")
+    ap.add_argument("--raop-lead", type=int, default=0,
+                    help="ms the AirPlay 1 stream is sent ahead (cliairplay's RAOP lead; "
+                         "default 2000, the device is told this + 250 ms as its latency)")
     ap.add_argument("--linger", type=int, default=300,
                     help="seconds to keep the AirPlay 1 connection open after a session ends")
     ap.add_argument("--warmup", type=int, default=3000,

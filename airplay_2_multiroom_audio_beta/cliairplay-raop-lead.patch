@@ -1,0 +1,16 @@
+diff --git a/src/cliairplay.c b/src/cliairplay.c
+index a872591..80241c1 100644
+--- a/src/cliairplay.c
++++ b/src/cliairplay.c
+@@ -1296,6 +1296,11 @@ static int run_raop(cli_config_t *cfg)
+      * that was not supplied is rejected before any connect attempt (main). */
+     char *password = (cfg->password && *cfg->password) ? cfg->password : NULL;
+ 
++    /* hassio-apps patch: the RAOP lead (fixed 2000 ms upstream) can be set
++     * with CLIAIRPLAY_RAOP_LEAD_MS, for an AirPlay 2 -> AirPlay 1 bridge that
++     * only has its source audio a second or so ahead. */
++    const char *raop_lead = getenv("CLIAIRPLAY_RAOP_LEAD_MS");
++    if (raop_lead && atoi(raop_lead) > 0) cfg->lead_ms = atoi(raop_lead);
+     int latency = MS2TS(cfg->lead_ms, cfg->sample_rate);
+ 
+     /* Codec selection: default to compressed ALAC, which virtually every RAOP
