@@ -47,6 +47,8 @@ set; that restarts only that zone.
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
                     shairport-sync; sink_zone_manager starts it again at once
+  POST /api/card/rate {"card", "rate"}: sets a sound card's sample rate ("" =
+        Auto) in card_options and reloads the card now
   POST /api/bt_reset {}: power-cycles the host's Bluetooth adapter(s) through
                     BlueZ on the host bus (bt_reset.py); BlueZ clients then
                     reconnect their sinks
@@ -95,7 +97,7 @@ PAIR_NEEDS = {"front": {"front-left", "front-right"}, "rear": {"rear-left", "rea
 
 # -- data ---------------------------------------------------------------
 def list_sinks() -> list:
-    """[{name, description, driver, channel_map}] for every sink."""
+    """[{name, description, driver, channel_map, sample_specification}] for every sink."""
     try:
         res = subprocess.run(["pactl", "list", "sinks"], capture_output=True,
                              text=True, timeout=10)
@@ -111,7 +113,7 @@ def list_sinks() -> list:
         if cur is None or ":" not in s:
             continue
         key, val = s.split(":", 1)
-        if key in ("Name", "Description", "Driver", "Channel Map"):
+        if key in ("Name", "Description", "Driver", "Channel Map", "Sample Specification"):
             cur[key.lower().replace(" ", "_")] = val.strip()
     return sinks
 
@@ -675,6 +677,79 @@ def set_profile(card: str, profile: str) -> list:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
     finally:
         mark_busy()   # the zone manager's hotplug check waits a little longer
+
+
+CARD_RATES = ("44100", "48000", "96000", "192000")
+
+
+def card_of_sink(sink: str, pa_cards: list):
+    """The PulseAudio card a sound-card output sink belongs to, or None."""
+    return next((c["name"] for c in pa_cards if sink.startswith(card_sink_prefix(c["name"]))), None)
+
+
+def card_rate_option(options: dict, card: str) -> str:
+    """The rate set for a card in card_options, or "" (Auto)."""
+    for ent in options.get("card_options") or []:
+        if isinstance(ent, dict) and ent.get("card") == card:
+            m = re.search(r"(?:^|\s)rate=(\d+)", str(ent.get("options", "")))
+            return m.group(1) if m else ""
+    return ""
+
+
+def set_card_rate(card: str, rate: str) -> list:
+    """Sets a sound card's sample rate (module-alsa-card rate=, kept in
+    card_options so it is applied at every start) and applies it now: the
+    card is reloaded with its profile, and its zones' sinks are loaded again.
+    rate "" is Auto: the card is reloaded without a rate."""
+    rate = str(rate or "").strip()
+    if rate and rate not in CARD_RATES:
+        raise ApplyError(f"rate must be one of {', '.join(CARD_RATES)} (or Auto)")
+    mark_busy()
+    mods = rs.alsa_card_modules()
+    if mods is None:
+        raise ApplyError("pactl not available")
+    if card not in mods:
+        raise ApplyError(f"no card {card} loaded; reload the page")
+    label = next((c["description"] for c in list_cards() if c["name"] == card), "") or card
+    idx, args = mods[card]
+    lines = []
+    current = next((v.strip('"') for k, v in args if k == "rate"), "")
+    if current != rate:
+        new_args = " ".join(f"{k}={v}" for k, v in args if k != "rate") + (f" rate={rate}" if rate else "")
+        profile = (rs.card_profiles_now() or {}).get(card, ("", set()))[0]
+        ok, out = rs.pactl("unload-module", idx)
+        if not ok:
+            raise ApplyError(f"reloading {label} failed: {out}")
+        ok, out = rs.pactl("load-module", "module-alsa-card", new_args)
+        if not ok:
+            rs.pactl("load-module", "module-alsa-card", " ".join(f"{k}={v}" for k, v in args))
+            raise ApplyError(f"{label} didn't load at {rate or 'its default rate'} ({out}); "
+                             "it was loaded again as it was")
+        if profile:
+            rs.pactl("set-card-profile", card, profile)
+        lines.append(f"{label}: reloaded at {rate + ' Hz' if rate else 'its default rate (Auto)'}")
+    else:
+        lines.append(f"{label} is already at {rate + ' Hz' if rate else 'its default rate'}; saving it")
+
+    def edit_options(options):
+        out, found = [], False
+        for ent in options.get("card_options") or []:
+            if isinstance(ent, dict) and ent.get("card") == card:
+                found = True
+                rest = " ".join(t for t in str(ent.get("options", "")).split() if not t.startswith("rate="))
+                o = (rest + (f" rate={rate}" if rate else "")).strip()
+                if o:
+                    out.append({"card": card, "options": o})
+            else:
+                out.append(ent)
+        if not found and rate:
+            out.append({"card": card, "options": f"rate={rate}"})
+        options["card_options"] = out
+        return [f"card_options: {label} " + (f"rate={rate}" if rate else "rate removed (Auto)")]
+    try:
+        return lines + change_and_apply(lambda entries, descs: [], edit_options)
+    finally:
+        mark_busy()
 
 
 def load_disabled_zones() -> set:
@@ -1341,7 +1416,7 @@ pre#result.err,pre#result_c.err,pre#zresult.err,pre#cresult.err,pre#kresult.err{
 .btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
 form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
 form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
-form.create select{min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
+form.create select,select.crate_sel{min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
 tr.zedit td{background:#161a21}
 div.zform{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}
 div.zform label{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
@@ -1481,6 +1556,8 @@ document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('cli
 }));
 document.querySelectorAll('button.kswitch').forEach(b => b.addEventListener('click', () =>
   post('api/combine/enabled', {index: Number(b.dataset.index), enabled: b.dataset.on === '1'}, 'kresult')));
+document.querySelectorAll('button.crate').forEach(b => b.addEventListener('click', () =>
+  post('api/card/rate', {card: b.dataset.card, rate: b.previousElementSibling.value})));
 document.querySelectorAll('button.sdelete').forEach(b => b.addEventListener('click', () => {
   if (b.dataset.armed) { post('api/sink/delete', {index: Number(b.dataset.index)}); return; }
   b.dataset.armed = '1'; b.textContent = 'Click again to delete';
@@ -1701,6 +1778,23 @@ def render(st: dict) -> str:
                 f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div></div>'
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">Max volume saves with Apply.</p></td></tr>')
 
+    sink_specs = {x["name"]: x.get("sample_specification", "") for x in list_sinks() if "name" in x}
+
+    def rate_ctl(master):
+        card = card_of_sink(master, st["pa_cards"])
+        if not card or not card.startswith("alsa_card."):
+            return ""
+        set_ = card_rate_option(opts, card)
+        now = (re.search(r"(\d+)Hz", sink_specs.get(master, "")) or [None, ""])[1]
+        sel = "".join(f'<option value="{r}"{" selected" if r == set_ else ""}>{int(r) / 1000:g} kHz</option>'
+                      for r in CARD_RATES)
+        return (f'<div style="flex:0 0 auto;margin-left:14px"><label>Card rate'
+                + (f' (now {int(now) / 1000:g} kHz)' if now else "") + '</label>'
+                f'<div style="display:flex;gap:6px"><select class="crate_sel" aria-label="Sample rate for the card">'
+                f'<option value=""{" selected" if not set_ else ""}>Auto</option>{sel}</select>'
+                f'<button class="btn sec sm crate" type="button" data-card="{e(card)}" '
+                f'title="Reloads the whole card: every zone on it restarts">Set</button></div></div>')
+
     card_order = {c["name"]: i for i, c in enumerate(st["cards"])}
     pair_order = {p: i for i, p in enumerate(PAIR_LABEL)}
     items = [("r", r, card_order.get(r["master"], 999), pair_order.get(r.get("pair", ""), 99), n)
@@ -1728,6 +1822,7 @@ def render(st: dict) -> str:
             acts = f'<button class="btn sec sm adopt" data-name="{e(r["name"])}">Adopt</button>'
         else:
             acts = f'<span class="sub" style="font-size:12px;margin-left:10px">Can\'t adopt: {e(r.get("adopt_note", ""))}</span>'
+        acts += rate_ctl(r["master"])
         player_row("remap", r["name"], r["name"], True, r["index"], r.get("enabled", True), managed,
                    r["channels"], r["master_description"] or r["master"], r["system_name"], status, acts,
                    "" if managed else "unmanaged")
@@ -1867,7 +1962,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
                         "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled",
-                        "/api/players"):
+                        "/api/players", "/api/card/rate"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1888,6 +1983,8 @@ class Handler(BaseHTTPRequestHandler):
                 lines = set_sink_enabled(body.get("index"), bool(body.get("enabled")))
             elif path == "/api/players":
                 lines = apply_players(body.get("rows"))
+            elif path == "/api/card/rate":
+                lines = set_card_rate(str(body.get("card", "")), str(body.get("rate", "")))
             elif path == "/api/sink/delete":
                 lines = delete_sink(body.get("index"))
             elif path == "/api/combine/enabled":

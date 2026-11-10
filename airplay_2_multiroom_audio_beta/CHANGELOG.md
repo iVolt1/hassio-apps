@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.165)
+- **Card rate in the web panel.** A sound-card zone's **More** now has **Card rate**
+  (Auto, 44.1, 48, 96 or 192 kHz) with the rate the card runs at now. **Set** reloads
+  that card at the new rate right away (keeping its profile and any other card options,
+  e.g. the X-Fi's `mmap=no tsched=no`), loads its zones' sinks again, and keeps the rate
+  in `card_options` so it is applied at every start. Every zone on that card restarts.
+  Auto removes the rate. Matching the card to the music (44.1 kHz for most sources)
+  avoids resampling, and a lower rate can cure dropouts on S/PDIF links.
+
 ### Added (0.163)
 - **Dropout finder in the AirPlay 1 bridge log.** The bridge now logs any short
   near-silent stretch (10 ms to 3 s) in the audio it passes on, with the clock time it
