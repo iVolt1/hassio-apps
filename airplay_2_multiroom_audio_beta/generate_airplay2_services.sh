@@ -39,6 +39,7 @@ echo "# AirPlay 2 services generated on $(date)" > "$log_file"
 mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
 : > /config/shairport-sync/logs/sink_zone_manager.log
 : > /config/cast-bridge/logs/cast_bridge_manager.log
+mkdir -p /config/ap1-bridge && : > /config/ap1-bridge/ap1_bridge_manager.log
 : > /config/shairport-sync/logs/web_panel.log
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
@@ -468,6 +469,25 @@ exec ${NETNS_EXEC}python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridg
 EOF
     chmod +x "${CASTBRIDGE_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-castbridge-manager"
+fi
+
+# AirPlay 2 -> AirPlay 1 bridge manager: one ap1_bridge.py per AirPlay 1
+# device switched on in the web panel (see ap1_bridge_manager.py). In the
+# zones' network namespace, next to nqptp and avahi, like the Cast manager.
+AP1_MANAGER_SERVICE="${BASE_DIR}/airplay2-ap1bridge-manager"
+if [ ! -d "$AP1_MANAGER_SERVICE" ]; then
+    mkdir -p "$AP1_MANAGER_SERVICE" "${AP1_MANAGER_SERVICE}/dependencies.d"
+    echo "longrun" > "${AP1_MANAGER_SERVICE}/type"
+    touch "${AP1_MANAGER_SERVICE}/dependencies.d/airplay2-dbus"
+    touch "${AP1_MANAGER_SERVICE}/dependencies.d/airplay2-avahi"
+    touch "${AP1_MANAGER_SERVICE}/dependencies.d/airplay2-nqptp"
+    cat > "${AP1_MANAGER_SERVICE}/run" <<EOF
+#!/usr/bin/with-contenv bashio
+mkdir -p /config/ap1-bridge
+exec ${NETNS_EXEC}python3 /usr/sbin/ap1_bridge_manager.py >> /config/ap1-bridge/ap1_bridge_manager.log 2>&1
+EOF
+    chmod +x "${AP1_MANAGER_SERVICE}/run"
+    touch "${CONTENTS_DIR}/airplay2-ap1bridge-manager"
 fi
 
 # One manager for every PulseAudio-sink zone (see the comment above).
