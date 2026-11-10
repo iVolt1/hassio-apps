@@ -40,7 +40,9 @@ Stop it with Ctrl-C.
 """
 
 import argparse
+import array
 import collections
+import math
 import os
 import signal
 import struct
@@ -161,6 +163,7 @@ class Bridge:
         self.skip = 0                      # frames still to skip (a backwards jump)
         self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
+        self.peak = 0                      # loudest sample since the last report
         self.last_report = time.time()
 
     # -- records from shairport-sync -------------------------------------------------
@@ -195,7 +198,11 @@ class Bridge:
             return                          # silence before anything timed: skip
         self.queue.append((play_ns if flags & TIMED else None, audio))
         self.idle_since = None
-        if self.sender is None or not self.sender.alive():
+        if self.sender is not None and not self.sender.alive():
+            say("the AirPlay 1 device closed the connection; reconnecting")
+            self.sender.stop()               # tidy up the old one
+            self.sender = None
+        if self.sender is None:
             say("audio arriving: connecting to the AirPlay 1 device")
             try:
                 self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose)
@@ -291,6 +298,10 @@ class Bridge:
             elif err < -DEADBAND_MS and frames > 1:
                 audio = audio[BPF:]           # one frame dropped: the rest plays a frame earlier
                 self.stats["dropped"] += 1
+        if audio:
+            a16 = array.array("h", audio[:len(audio) // 2 * 2])
+            if a16:
+                self.peak = max(self.peak, max(a16), -min(a16))
         if self.skip and audio:
             k = min(self.skip, len(audio) // BPF)
             audio = audio[k * BPF:]
@@ -304,7 +315,10 @@ class Bridge:
         if time.time() - self.last_report >= 10:
             self.last_report = time.time()
             s = self.stats
-            say(f"in step: error {s['err']:+.2f} ms, lead {s['lead']:.0f} ms, "
+            level = (f"{20 * math.log10(self.peak / 32768):.0f} dBFS" if self.peak
+                     else "silence (check the player's volume in the sender)")
+            self.peak = 0
+            say(f"in step: error {s['err']:+.2f} ms, lead {s['lead']:.0f} ms, level {level}, "
                 f"frames added {s['added']} dropped {s['dropped']}, "
                 f"gaps {s['gaps']} ({s['gap_ms']:.0f} ms), restarts {s['resyncs']}")
 

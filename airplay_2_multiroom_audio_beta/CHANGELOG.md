@@ -13,6 +13,10 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 - The mDNS lookup no longer asks devices for their details inside zeroconf's callback,
   which blocked its event loop and could kill the lookup (`EventLoopBlocked`) when one
   device was slow to answer.
+- `ap1_bridge.py`: the 10 s status line shows the audio level the bridge passes on
+  (dBFS, or "silence"), to tell a silent device from a muted sender; and when the device
+  drops an idle connection (TuneAero does), the old connection is tidied up before
+  reconnecting (no `BrokenPipeError` traceback).
 
 ### Changed
 - `ap1_bridge.py` and `ap1_test.py` take the device's AirPlay name instead of an IP
