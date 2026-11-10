@@ -3,6 +3,7 @@
 
     docker exec -it app_2c14ac29_airplay_2_multiroom_audio_beta \
         python3 /usr/sbin/ap1_bridge.py 192.168.1.184 --name "Echo Dot AP2"
+    python3 /usr/sbin/ap1_bridge.py "BA 790 TA"          (by AirPlay name)
 
 Starts an AirPlay 2 receiver ("--name") with shairport-sync-ap1bridge, a
 build of mikebrady/shairport-sync#2334 whose pipe output puts a timing
@@ -349,6 +350,10 @@ def main() -> int:
     say(f"network: {'netns ' + NETNS + ' (with the other AirPlay 2 zones)' if in_ns else 'host'}")
 
     port, txt = raop_service(a.ip)
+    if not txt and not a.ip.replace(".", "").isdigit():
+        say(f"no AirPlay 1 device called '{a.ip}' found over mDNS")
+        return 1
+    a.ip = txt.get("_addr", a.ip)            # a name was given: its address
     raop_port = a.raop_port or port or 5000
     name = a.name or (txt.get("_name") or f"AirPlay 1 {a.ip}") + " AP2"
 

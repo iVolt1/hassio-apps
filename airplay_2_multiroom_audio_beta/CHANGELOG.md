@@ -6,6 +6,20 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- `ap1_test.py` / `ap1_bridge.py`: the mDNS lookup waited only 3 s, too short for slower
+  responders (TuneAero on Windows), so the device wasn't found and the port fell back to
+  5000. It now waits up to 8 s (returning as soon as the device answers), and
+  `ap1_test.py` stops with a message when a name isn't found.
+- The mDNS lookup no longer asks devices for their details inside zeroconf's callback,
+  which blocked its event loop and could kill the lookup (`EventLoopBlocked`) when one
+  device was slow to answer.
+
+### Changed
+- `ap1_bridge.py` and `ap1_test.py` take the device's AirPlay name instead of an IP
+  (`ap1_bridge.py "BA 790 TA"`); it is looked up over mDNS (any case, part of the name
+  is enough) and gives the address, port and settings.
+
+### Fixed
 - Version 0.151 (0.150 would read as 0.15).
 - AirPlay 1 bridge (`ap1_bridge.py`): the network namespace check looked for a file
   `docker exec` doesn't see, so the bridge's AirPlay 2 receiver ran on the host side
