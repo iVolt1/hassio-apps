@@ -5,6 +5,26 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.164)
+- **Line inputs to Music Assistant (Sendspin source).** A new *Line inputs* table in the
+  web panel lists every sound-card input (monitors left out). Tick **Send** and Apply, and
+  the input becomes a Sendspin source device (`linein_manager.py`, service
+  `airplay2-linein-manager`): Music Assistant's built-in *Sendspin Source* plugin finds it
+  and, once you approve (or pair) it there, lists it under Live Inputs to play on any
+  player or group. No AirPlay hop: it is captured with `parec` and sent as 48 kHz 16-bit
+  PCM only while Music Assistant asks for it.
+  - **Line sense:** the input reports *signal present* when its level stays above the
+    threshold (default -50 dBFS) for half a second, and *no signal* after the hold time
+    (default 10 s) below it. Pick a player under the device's *Automatically play line-in
+    on* in Music Assistant and it starts when you drop the needle, and stops a minute after
+    the record ends.
+  - Per input: the name Music Assistant shows (default: the input's description); under
+    **More**, signal threshold and hold. Status shows waiting / approve / ready / streaming,
+    the pairing code while Music Assistant pairs with a code, and the input level.
+  - Each input listens on its own port from 8940 (`_sendspin._tcp` mDNS). Files:
+    `/config/line-in/` (settings, status, per-input identity and pairing records), log
+    `/config/line-in/linein_manager.log`.
+
 ### Added (0.163)
 - **Dropout finder in the AirPlay 1 bridge log.** The bridge now logs any short
   near-silent stretch (10 ms to 3 s) in the audio it passes on, with the clock time it

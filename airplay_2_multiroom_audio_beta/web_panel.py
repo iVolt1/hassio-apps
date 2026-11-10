@@ -47,6 +47,8 @@ set; that restarts only that zone.
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
                     shairport-sync; sink_zone_manager starts it again at once
+  POST /api/linein {"rows": [...]}: the Line inputs table's Apply (sent to
+        Music Assistant on/off, name, signal threshold / hold)
   POST /api/bt_reset {}: power-cycles the host's Bluetooth adapter(s) through
                     BlueZ on the host bus (bt_reset.py); BlueZ clients then
                     reconnect their sinks
@@ -81,6 +83,8 @@ ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").s
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
 AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))   # ap1_bridge_manager.py
+LINEIN_DIR = Path(os.environ.get("WP_LINEIN_DIR", "/config/line-in"))  # linein_manager.py
+LINEIN_KEY = "linein:"
 ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
 SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
@@ -703,6 +707,87 @@ def ap1_devices() -> list:
             out.append({**d, "settings": settings.get(d["key"], {}),
                         "status": status.get(d["key"], {})})
     return sorted(out, key=lambda d: d["name"].lower())
+
+
+def linein_inputs() -> list:
+    """Sound-card inputs linein_manager.py found, with their settings
+    (settings.json, written here) and state (status.json)."""
+    def rd(name, default):
+        try:
+            return json.loads((LINEIN_DIR / name).read_text())
+        except (OSError, ValueError):
+            return default
+    settings, status = rd("settings.json", {}), rd("status.json", {})
+    return [{**d, "settings": settings.get(d["source"], {}), "status": status.get(d["source"], {})}
+            for d in rd("discovered.json", []) if isinstance(d, dict) and d.get("source")]
+
+
+def apply_linein(rows: list) -> list:
+    """The Line inputs table's Apply: Music Assistant on/off (enabled_zones
+    entries linein:<source>) and name / threshold / hold (LINEIN_DIR/
+    settings.json, which linein_manager.py watches)."""
+    if not isinstance(rows, list) or not rows:
+        raise ApplyError("nothing to apply")
+    if not rs.OPT_IN_FILE.exists():
+        raise ApplyError("line inputs can be switched once the add-on has restarted")
+    try:
+        options = json.loads(OPTIONS_FILE.read_text())
+    except (OSError, ValueError) as e:
+        raise ApplyError(f"cannot read {OPTIONS_FILE}: {e}")
+    inputs = {d["source"]: d for d in linein_inputs()}
+    try:
+        settings = json.loads((LINEIN_DIR / "settings.json").read_text())
+    except (OSError, ValueError):
+        settings = {}
+    lines, opts_changed, set_changed = [], False, False
+    for row in rows:
+        src = str((row or {}).get("source", ""))
+        d = inputs.get(src)
+        if not d:
+            raise ApplyError(f"{src or '?'}: that input isn't listed any more; reload the page")
+        label = d["description"]
+        if "on" in row:
+            if rs.set_zone_on(options, LINEIN_KEY + src, bool(row["on"])):
+                opts_changed = True
+                lines.append(f"{label}: {'sent to' if row['on'] else 'no longer sent to'} Music Assistant")
+        s_ = dict(settings.get(src, {}))
+        if "name" in row:
+            name = str(row["name"]).strip()
+            if not name:
+                raise ApplyError(f"{label}: the name can't be empty")
+            if name == d["description"]:
+                s_.pop("name", None)
+            else:
+                s_["name"] = name
+        for field, lab, lo, hi in (("threshold_db", "Signal threshold (dBFS)", -90, -10),
+                                   ("hold_s", "Signal hold (s)", 1, 600)):
+            if field in row:
+                v = str(row[field] or "").strip()
+                if not v:
+                    s_.pop(field, None)
+                    continue
+                try:
+                    n = float(v)
+                except ValueError:
+                    raise ApplyError(f"{label}: {lab}: '{v}' is not a number")
+                if not lo <= n <= hi:
+                    raise ApplyError(f"{label}: {lab} must be between {lo} and {hi}")
+                s_[field] = n
+        if s_ != settings.get(src, {}):
+            if s_:
+                settings[src] = s_
+            else:
+                settings.pop(src, None)
+            set_changed = True
+            lines.append(f"{label}: " + (", ".join(f"{k} {v}" for k, v in s_.items()) or "default settings"))
+    if opts_changed:
+        save_options(options)
+    if set_changed:
+        LINEIN_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = LINEIN_DIR / "settings.json.tmp"
+        tmp.write_text(json.dumps(settings, indent=1))
+        os.replace(tmp, LINEIN_DIR / "settings.json")
+    return lines or ["nothing changed"]
 
 
 def load_options() -> dict:
@@ -1389,6 +1474,23 @@ document.querySelectorAll('button.pmore').forEach(b => b.addEventListener('click
   b.textContent = row.hidden ? 'More' : 'Less';
 }));
 const allButtons = () => document.querySelectorAll('button.btn');
+// Line inputs table: its own fields and Apply.
+const lvs = [...document.querySelectorAll('.lv')], lapply = document.getElementById('lapply');
+const lch = i => i.type === 'checkbox' ? i.checked !== i.defaultChecked : i.value.trim() !== i.defaultValue;
+lvs.forEach(i => i.addEventListener(i.type === 'checkbox' ? 'change' : 'input', () => {
+  i.classList.toggle('changed', lch(i)); lapply.disabled = !lvs.some(lch);
+}));
+if (lapply) lapply.addEventListener('click', () => {
+  const rows = [];
+  document.querySelectorAll('tr.lrow').forEach(r => {
+    const fs = [...r.querySelectorAll('.lv'), ...document.getElementById(r.id.slice(0, -2)).querySelectorAll('.lv')];
+    if (!fs.some(lch)) return;
+    const row = {source: r.dataset.source};
+    fs.forEach(x => row[x.dataset.f] = x.type === 'checkbox' ? x.checked : x.value.trim());
+    rows.push(row);
+  });
+  post('/api/linein', {rows}, 'lresult');
+});
 async function post(url, body, outId = 'result', delay = 3000) {
   const out = document.getElementById(outId);
   allButtons().forEach(b => b.disabled = true);
@@ -1765,6 +1867,53 @@ def render(st: dict) -> str:
                   f'<pre id="result" hidden></pre>') if prows else \
                  '<p class="sub" style="margin-top:14px">No zones or sinks yet.</p><pre id="result" hidden></pre>'
 
+    lrows = []
+    for d in linein_inputs():
+        src, s_, b = d["source"], d["settings"], d["status"]
+        on = rs.zone_is_on(opts, LINEIN_KEY + src) if rs.OPT_IN_FILE.exists() else False
+        rid = f"li_{len(lrows)}"
+        name = s_.get("name") or d["description"]
+        if not on:
+            stt = "Off"
+        elif not b:
+            stt = "Starting"
+        else:
+            srv = e(b.get("server") or "Music Assistant")
+            stt = {"streaming": f"Streaming to {srv}",
+                   "connected": f"Ready in {srv}" + (" (paired)" if b.get("paired") else ""),
+                   "waiting_approval": f'<span class="warn">Connected: approve it in {srv}</span>',
+                   "listening": "Waiting for Music Assistant"}.get(b.get("state"), "Starting")
+            if b.get("pairing_code"):
+                stt += f'<div class="warn">Pairing code: <b>{e(b["pairing_code"])}</b></div>'
+            if b.get("error"):
+                stt += f'<div class="warn">{e(b["error"])}</div>'
+        lvl = "—"
+        if on and b and b.get("level_db") is not None:
+            lvl = f'{b["level_db"]} dBFS' + (" · signal" if b.get("signal") == "present" else "")
+        lrows.append(
+            f'<tr class="lrow" id="{rid}_r" data-source="{e(src)}"><td><input class="lv nm" data-f="name" '
+            f'value="{e(name)}" aria-label="Name in Music Assistant for {e(d["description"])}" style="min-width:200px"></td>'
+            f'<td>{e(d["description"])}<div class="mono" style="font-size:12px">{e(src)}</div></td>'
+            f'<td class="ck"><input type="checkbox" class="lv" data-f="on"{" checked" if on else ""} '
+            f'aria-label="Send {e(d["description"])} to Music Assistant"></td>'
+            f'<td style="white-space:nowrap">{stt}<button class="btn sec sm pmore" type="button" data-target="{rid}">More</button></td>'
+            f'<td style="white-space:nowrap">{lvl}</td><td>{e(str(b.get("port") or "—") if on else "—")}</td></tr>'
+            f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="6"><div class="zform">'
+            f'<div style="flex:0 0 190px"><label>Signal threshold (dBFS)</label>'
+            f'<input class="lv" data-f="threshold_db" inputmode="decimal" value="{e(str(s_.get("threshold_db", "")))}" placeholder="-50"></div>'
+            f'<div style="flex:0 0 160px"><label>Signal hold (s)</label>'
+            f'<input class="lv" data-f="hold_s" inputmode="decimal" value="{e(str(s_.get("hold_s", "")))}" placeholder="10"></div></div>'
+            f'<p class="sub" style="margin:10px 0 0;font-size:12px">The input reports a signal once its level stays above the threshold '
+            f'for half a second, and no signal once it has been below it for the hold time. Set the threshold above the input\'s '
+            f'idle noise (watch Level with the source stopped). Format: {e(d.get("spec", ""))}, sent as 48 kHz 16-bit stereo.</p></td></tr>')
+    linein_html = (f'<div class="box"><table class="players"><thead><tr><th>Name in Music Assistant</th><th>Input</th>'
+                   f'<th>Send</th><th>Status</th><th>Level</th><th>Port</th></tr></thead><tbody>{"".join(lrows)}</tbody></table></div>'
+                   f'<div class="bar"><p class="sub" style="margin:0">A sent input appears in Music Assistant as a Sendspin device: approve it '
+                   f'(or pair it) once, then play it from Live Inputs, or pick a player under the device\'s '
+                   f'"Automatically play line-in on" to start it when a signal appears.</p>'
+                   f'<button class="btn pri" id="lapply" disabled>Apply</button></div><pre id="lresult" hidden></pre>'
+                   ) if lrows else '<p class="sub" style="margin-top:14px">No sound-card inputs found.</p>'
+
     creatable = [c for c in st["cards"] if c["free"] or c["free_channels"]]
     if creatable:
         def free_opts(c):
@@ -1813,6 +1962,7 @@ def render(st: dict) -> str:
 <header><b>AirPlay 2 Multiroom Audio</b></header>
 <main>
 <section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
+<section><h2>Line inputs</h2><p class="sub">Sound-card inputs (line-in, turntable, mic) as Live Inputs in Music Assistant, over Sendspin.</p>{linein_html}</section>
 <section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
 <button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
 <section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile restarts that card's zones.</p>
@@ -1867,7 +2017,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
                         "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled",
-                        "/api/players"):
+                        "/api/players", "/api/linein"):
             self._send(404, "Not found\n", "text/plain")
             return
         try:
@@ -1888,6 +2038,8 @@ class Handler(BaseHTTPRequestHandler):
                 lines = set_sink_enabled(body.get("index"), bool(body.get("enabled")))
             elif path == "/api/players":
                 lines = apply_players(body.get("rows"))
+            elif path == "/api/linein":
+                lines = apply_linein(body.get("rows"))
             elif path == "/api/sink/delete":
                 lines = delete_sink(body.get("index"))
             elif path == "/api/combine/enabled":
