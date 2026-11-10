@@ -17,8 +17,10 @@ While playing it compares each block's play time with where the stream
 has got to and keeps them together:
   - small differences (clock drift between the two time bases) are
     corrected by adding or dropping a single frame now and then;
-  - a large one (a gap, a late start) by flushing and starting again
-    at the next block (a short gap on the AirPlay 1 device only).
+  - a jump (the receiver dropped audio it got too late, so its play
+    times leap ahead) by filling the gap with silence, or skipping, at once;
+  - a very large one (over 2 s) by flushing and starting again at the next
+    block.
 A flush from the sender (seek, skip, pause) is passed on as a flush and a
 new start; the end of a play session stops cliairplay, so the device is
 free for other senders between sessions.
@@ -55,8 +57,9 @@ HEADER = struct.Struct("<IHHIIQII")   # see "ADVANCED TOPICS/PipeOutput.md" in t
 MAGIC = 0x48545053                    # "SPTH"
 TIMED, FLUSH, STOP = 1, 2, 4
 RATE, BPF = 44100, 4                  # S16_LE stereo, what cliairplay takes by default
-DEADBAND_MS = 1.0                     # drift corrected beyond this
-RESYNC_MS = 40.0                      # flush + start again beyond this
+DEADBAND_MS = 1.0                     # drift corrected a frame at a time beyond this
+GAP_MS = 5.0                          # a jump beyond this is filled / skipped at once
+RESYNC_MS = 2000.0                    # flush + start again beyond this
 
 
 def mono_to_unix_ms(play_ns: int) -> float:
@@ -148,7 +151,9 @@ class Bridge:
         self.start_ms = 0.0                # unix ms at which fed frame 0 plays
         self.fed = 0                       # frames given to cliairplay since the start
         self.min_lead = a.min_lead
-        self.stats = {"added": 0, "dropped": 0, "resyncs": 0, "err": 0.0, "lead": 0.0}
+        self.skip = 0                      # frames still to skip (a backwards jump)
+        self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
+                      "resyncs": 0, "err": 0.0, "lead": 0.0}
         self.last_report = time.time()
 
     # -- records from shairport-sync -------------------------------------------------
@@ -204,6 +209,7 @@ class Bridge:
         first_ns = self.queue[0][0]
         self.start_ms = mono_to_unix_ms(first_ns)
         self.fed = 0
+        self.skip = 0
         for _, data in self.queue:
             self.sender.write(data)
             self.fed += len(data) // BPF
@@ -231,7 +237,8 @@ class Bridge:
     def play(self, flags, frames, play_ns, audio):
         """Pass a block on, keeping the stream where the play times say it should be."""
         if flags & TIMED:
-            expected = self.start_ms + self.fed * 1000.0 / RATE
+            # Frames still to be skipped play no time: this block starts that much earlier.
+            expected = self.start_ms + (self.fed - self.skip) * 1000.0 / RATE
             actual = mono_to_unix_ms(play_ns)
             err = actual - expected          # > 0: we're early; < 0: we're late
             self.stats["err"] = err
@@ -244,12 +251,30 @@ class Bridge:
                 self.state = "syncing"
                 self.sync(flags, play_ns, audio)
                 return
-            if err > DEADBAND_MS and frames:
+            if abs(err) > GAP_MS:
+                # The receiver skipped audio it got too late (play time jumped
+                # ahead): fill the gap with silence, as the AirPlay 2 rooms
+                # play nothing for it. A jump back: skip that much audio.
+                n = round(abs(err) * RATE / 1000)
+                self.stats["gaps"] += 1
+                self.stats["gap_ms"] += abs(err)
+                say(f"receiver timeline jumped {err:+.1f} ms: "
+                    f"{'filling the gap with silence' if err > 0 else 'skipping that much audio'}"
+                    " to stay in step")
+                if err > 0:
+                    audio = b"\0" * (n * BPF) + audio
+                else:
+                    self.skip += n
+            elif err > DEADBAND_MS and frames:
                 audio = audio[:BPF] + audio   # one frame added: the rest plays a frame later
                 self.stats["added"] += 1
             elif err < -DEADBAND_MS and frames > 1:
                 audio = audio[BPF:]           # one frame dropped: the rest plays a frame earlier
                 self.stats["dropped"] += 1
+        if self.skip and audio:
+            k = min(self.skip, len(audio) // BPF)
+            audio = audio[k * BPF:]
+            self.skip -= k
         try:
             self.sender.write(audio)
             self.fed += len(audio) // BPF
@@ -260,7 +285,8 @@ class Bridge:
             self.last_report = time.time()
             s = self.stats
             say(f"in step: error {s['err']:+.2f} ms, lead {s['lead']:.0f} ms, "
-                f"frames added {s['added']} dropped {s['dropped']}, restarts {s['resyncs']}")
+                f"frames added {s['added']} dropped {s['dropped']}, "
+                f"gaps {s['gaps']} ({s['gap_ms']:.0f} ms), restarts {s['resyncs']}")
 
 
 def read_exact(f, n):

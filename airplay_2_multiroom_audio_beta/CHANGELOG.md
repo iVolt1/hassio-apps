@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- AirPlay 1 bridge: when the AirPlay 2 receiver drops audio that arrived too late, its
+  play times jump ahead. The bridge used to catch up a frame per block and then restart
+  the device's stream; it now fills the gap with the same amount of silence (or skips
+  audio for a jump back) at once, as the AirPlay 2 rooms do, and stays in step. The
+  10 s log line counts the gaps. Restarts only above a 2 s error.
+
 ### Added
 - AirPlay 2 -> AirPlay 1 bridge, step 2a (run by hand, one device):
   `docker exec -it app_2c14ac29_airplay_2_multiroom_audio_beta python3 /usr/sbin/ap1_bridge.py <device ip> [--name "..."]`
