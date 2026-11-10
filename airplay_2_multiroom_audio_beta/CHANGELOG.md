@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.159)
+- AirPlay 1 bridge: with `--offset`, a start needs blocks that much further ahead, but
+  `--buffer 1.0` delivers them only ~0.99 s ahead, so with `--raop-lead 500 --offset 330`
+  it never started (silently). The buffer is now raised to at least
+  (minimum lead + offset) + 0.3 s when needed, and the bridge says so if blocks keep
+  arriving with too little lead to start.
+
 ### Added (0.158)
 - `ap1_bridge.py --offset MS`: for an AirPlay 1 device that plays late by itself (its own
   output delay; TuneAero on Windows: about 1/3 s), the stream is started that much

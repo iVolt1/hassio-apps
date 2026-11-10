@@ -171,6 +171,7 @@ class Bridge:
         self.fed = 0                       # frames given to cliairplay since the start
         self.min_lead = a.min_lead
         self.skip = 0                      # frames still to skip (a backwards jump)
+        self.waiting_since, self.warned, self.short_lead = None, False, 0.0
         self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
         self.peak = 0                      # loudest sample since the last report
@@ -239,9 +240,19 @@ class Bridge:
             p, _ = self.queue[0]
             if p is not None and mono_to_unix_ms(p) >= not_before:
                 break
+            if p is not None:
+                self.short_lead = mono_to_unix_ms(p) - now
             self.queue.popleft()
         if not self.queue:
+            # Say so if this goes on (rather than waiting in silence).
+            if not self.waiting_since:
+                self.waiting_since = time.time()
+            elif time.time() - self.waiting_since > 5 and not self.warned:
+                self.warned = True
+                say(f"waiting to start: blocks arrive {self.short_lead:.0f} ms ahead, a start "
+                    f"needs {not_before - now:.0f} ms (raise --buffer, or lower --offset/--raop-lead)")
             return
+        self.waiting_since, self.warned = None, False
         first_ns = self.queue[0][0]
         self.start_ms = mono_to_unix_ms(first_ns)
         self.fed = 0
@@ -401,6 +412,13 @@ def main() -> int:
     if in_ns:
         os.environ["AP1_BRIDGE_IN_NS"] = "1"
     say(f"network: {'netns ' + NETNS + ' (with the other AirPlay 2 zones)' if in_ns else 'host'}")
+    # Blocks must arrive at least min_lead (+ a positive offset) ahead to be
+    # started; the receiver's buffer sets how far ahead they arrive.
+    need = (a.min_lead + max(0, a.offset)) / 1000 + 0.3
+    if a.buffer < need:
+        say(f"--buffer raised from {a.buffer:g} to {need:.2f} s: a start needs blocks "
+            f"{a.min_lead + max(0, a.offset)} ms ahead (lead + offset)")
+        a.buffer = round(need, 2)
 
     port, txt = raop_service(a.ip)
     if not txt and not a.ip.replace(".", "").isdigit():
