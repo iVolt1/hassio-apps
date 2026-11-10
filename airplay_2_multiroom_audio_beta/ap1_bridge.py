@@ -349,6 +349,10 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--send-from-host", action="store_true",
                     help="send the AirPlay 1 stream from the host's IP, not the zones' own")
+    ap.add_argument("--buffer", type=float, default=1.0,
+                    help="seconds of audio the receiver passes on ahead of its play time "
+                         "(the most lead a start can get; AirPlay 1 devices that report a "
+                         "long latency, e.g. TuneAero 2250 ms, may need more)")
     ap.add_argument("--linger", type=int, default=300,
                     help="seconds to keep the AirPlay 1 connection open after a session ends")
     ap.add_argument("--warmup", type=int, default=3000,
@@ -391,6 +395,8 @@ def main() -> int:
   {iface}
   output_backend = "pipe";
   mdns_backend = "avahi";
+  audio_backend_buffer_desired_length_in_seconds = {a.buffer};
+  audio_decoded_buffer_desired_length_in_seconds = {a.buffer + 0.5};
 }};
 sessioncontrol = {{ allow_session_interruption = "yes"; }};
 pipe = {{
