@@ -73,6 +73,8 @@ class Sender:
     def __init__(self, ip, port, txt, verbose):
         self.events = collections.defaultdict(threading.Event)
         self.started = {}
+        self.verbose = verbose
+        self.connected_at = time.time()
         tmp = tempfile.mkdtemp(prefix="ap1bridge-")
         self.pipe = os.path.join(tmp, "cmd")
         os.mkfifo(self.pipe)
@@ -100,9 +102,12 @@ class Sender:
     def _read(self, stream):
         for raw in stream:
             line = raw.decode(errors="replace").rstrip()
-            if "[STATUS]" in line or "[ERROR]" in line or "error" in line.lower():
-                if "playing elapsed_ms" not in line:
-                    say(f"  cliairplay: {line}")
+            if "playing elapsed_ms" in line:
+                continue
+            if ("[STATUS]" in line or "[ERROR]" in line or "error" in line.lower()
+                    or (self.verbose and any(w in line.lower()
+                                             for w in ("retr", "resend", "missing", "lost", "late")))):
+                say(f"  cliairplay: {line}")
             for key in ("connected", "audio", "started", "flushed"):
                 if f"[STATUS] {key}" in line:
                     if key == "started":
@@ -148,6 +153,7 @@ class Bridge:
         self.sender = None
         self.queue = collections.deque()   # (play_ns or None, audio) waiting for a start
         self.state = "idle"                # idle | syncing | playing
+        self.idle_since = None             # session ended, connection kept open (linger)
         self.start_ms = 0.0                # unix ms at which fed frame 0 plays
         self.fed = 0                       # frames given to cliairplay since the start
         self.min_lead = a.min_lead
@@ -162,17 +168,19 @@ class Bridge:
             self.queue.clear()
             if self.sender and self.state == "playing":
                 if flags & STOP:
-                    say("session ended: stopping the AirPlay 1 stream")
-                    self.sender.stop()
-                    self.sender, self.state = None, "idle"
+                    say(f"session ended: AirPlay 1 connection kept open for {self.a.linger} s")
+                    self.sender.send("ACTION=FLUSH")
+                    self.sender.wait("flushed", 5)
+                    self.state, self.idle_since = "idle", time.time()
                 else:
                     say("flush from the sender")
                     self.sender.send("ACTION=FLUSH")
                     self.sender.wait("flushed", 5)
                     self.state = "syncing"
-            elif flags & STOP and self.sender:
-                self.sender.stop()
-                self.sender, self.state = None, "idle"
+            elif flags & STOP and self.sender and self.state == "syncing":
+                self.sender.send("ACTION=FLUSH")
+                self.sender.wait("flushed", 5)
+                self.state, self.idle_since = "idle", time.time()
             if not frames:
                 return
         if self.state == "playing":
@@ -185,6 +193,7 @@ class Bridge:
         if not (flags & TIMED) and not self.queue:
             return                          # silence before anything timed: skip
         self.queue.append((play_ns if flags & TIMED else None, audio))
+        self.idle_since = None
         if self.sender is None or not self.sender.alive():
             say("audio arriving: connecting to the AirPlay 1 device")
             try:
@@ -197,11 +206,14 @@ class Bridge:
             self.state = "syncing"
         if not self.sender.events["connected"].is_set():
             return
-        # Drop blocks that would play too soon to be started on time.
+        # Drop blocks that would play too soon to be started on time, or
+        # before the device's clock has had time to sync to ours after a new
+        # connection (AirPlay 1 timing settles over the first exchanges).
         now = time.time() * 1000
+        not_before = max(now + self.min_lead, self.sender.connected_at * 1000 + self.a.warmup)
         while self.queue:
             p, _ = self.queue[0]
-            if p is not None and mono_to_unix_ms(p) - now >= self.min_lead:
+            if p is not None and mono_to_unix_ms(p) >= not_before:
                 break
             self.queue.popleft()
         if not self.queue:
@@ -233,6 +245,13 @@ class Bridge:
         self.start_ms += (t - self.start_ms)  # what cliairplay was told
         self.state = "playing"
         say(f"started in step: first block plays at {t} (in {lead:.0f} ms)")
+
+    def tick(self):
+        """Closes the AirPlay 1 connection after --linger seconds idle."""
+        if self.sender and self.idle_since and time.time() - self.idle_since > self.a.linger:
+            say("idle: closing the AirPlay 1 connection")
+            self.sender.stop()
+            self.sender, self.idle_since = None, None
 
     def play(self, flags, frames, play_ns, audio):
         """Pass a block on, keeping the stream where the play times say it should be."""
@@ -308,13 +327,26 @@ def main() -> int:
     ap.add_argument("--raop-port", type=int)
     ap.add_argument("--min-lead", type=int, default=300)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--linger", type=int, default=300,
+                    help="seconds to keep the AirPlay 1 connection open after a session ends")
+    ap.add_argument("--warmup", type=int, default=3000,
+                    help="ms after a new connection before the device joins")
     a = ap.parse_args()
 
     # The add-on's AirPlay 2 receivers live in the "ap2" network namespace
     # (their own IP); run there too when it exists.
-    if os.path.exists(f"/run/netns/{NETNS}") and not os.environ.get("AP1_BRIDGE_IN_NS"):
-        os.environ["AP1_BRIDGE_IN_NS"] = "1"
+    def ip_out(*args):
+        try:
+            return subprocess.run(["ip", *args], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+    have_ns = NETNS in ip_out("netns", "list").split()
+    in_ns = ip_out("netns", "identify", str(os.getpid())).strip() == NETNS
+    if have_ns and not in_ns:
         os.execvp("ip", ["ip", "netns", "exec", NETNS, sys.executable, *sys.argv])
+    if in_ns:
+        os.environ["AP1_BRIDGE_IN_NS"] = "1"
+    say(f"network: {'netns ' + NETNS + ' (with the other AirPlay 2 zones)' if in_ns else 'host'}")
 
     port, txt = raop_service(a.ip)
     raop_port = a.raop_port or port or 5000
@@ -349,6 +381,14 @@ pipe = {{
         "(AirPlay 1). Play to it, grouped with your other rooms. Ctrl-C to stop.")
 
     bridge = Bridge(a, raop_port, txt)
+    lock = threading.Lock()
+
+    def idle_timer():
+        while True:
+            time.sleep(1)
+            with lock:
+                bridge.tick()
+    threading.Thread(target=idle_timer, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         while sps.poll() is None:
@@ -374,7 +414,8 @@ pipe = {{
                     audio = read_exact(f, frames * bpf) if frames else b""
                     if audio is None:
                         break
-                    bridge.record(flags, frames, play_ns, audio)
+                    with lock:
+                        bridge.record(flags, frames, play_ns, audio)
     except KeyboardInterrupt:
         pass
     finally:

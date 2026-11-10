@@ -6,6 +6,19 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- Version 0.151 (0.150 would read as 0.15).
+- AirPlay 1 bridge (`ap1_bridge.py`): the network namespace check looked for a file
+  `docker exec` doesn't see, so the bridge's AirPlay 2 receiver ran on the host side
+  instead of with the other zones on the add-on's own IP, next to nqptp. It now asks
+  `ip netns` and logs `network: netns ap2 …`.
+- AirPlay 1 bridge: the device's clock (NTP over AirPlay 1) takes a while to settle
+  after each new connection, so sync started a little off and improved. The connection
+  is now kept open (idle) for `--linger` seconds (default 300) after a session, so the
+  next session starts warm, and on a new connection the device joins after a
+  `--warmup` (default 3000 ms; it skips that much audio). `--verbose` also shows
+  cliairplay's resend / missing-packet lines.
+
+### Fixed
 - AirPlay 1 bridge: when the AirPlay 2 receiver drops audio that arrived too late, its
   play times jump ahead. The bridge used to catch up a frame per block and then restart
   the device's stream; it now fills the gap with the same amount of silence (or skips
