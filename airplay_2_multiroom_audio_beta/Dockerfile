@@ -59,6 +59,32 @@ RUN git clone --depth 1 --branch 5.6.2 https://github.com/mikebrady/shairport-sy
     strip shairport-sync && \
     make install DESTDIR=/tmp/shairport-ap2-install
 
+# A second shairport-sync, used only by the AirPlay 1 bridge: mariusdkm's PR
+# branch adding timing headers to the pipe backend (mikebrady/shairport-sync#2334,
+# not merged yet; the header format may still change). Pinned to a commit. Every
+# other zone keeps using the 5.6.2 build above.
+FROM alpine-builder AS sps-pipe-builder
+ARG SPS_PIPE_REPO=https://github.com/mariusdkm/shairport-sync.git
+ARG SPS_PIPE_COMMIT=ce6ad19ee0976d5e43698d289990aefed226a057
+RUN git clone --branch ap2/s2-pipe-timing-headers ${SPS_PIPE_REPO} shairport-sync-pipe && \
+    cd shairport-sync-pipe && \
+    git checkout ${SPS_PIPE_COMMIT} && \
+    git apply /tmp/sps-ssrc0-fallback.patch && \
+    autoreconf -fi && \
+    ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --with-soxr \
+        --with-avahi \
+        --with-ssl=openssl \
+        --with-airplay-2 \
+        --with-pipe \
+        --with-metadata \
+        CFLAGS="-DCONFIG_FOR_LINUX" && \
+    make -j$(nproc) && \
+    strip shairport-sync && \
+    cp shairport-sync /tmp/shairport-sync-ap1bridge
+
 FROM ghcr.io/home-assistant/base:latest AS base
 # python3/py3-pip/ffmpeg (the real binary, not just ffmpeg-libs) added
 # for cast_bridge_manager.py + cast_bridge_zone.py — Cast device
@@ -76,6 +102,7 @@ RUN apk add -U -q --no-cache --no-progress \
 COPY --from=nqptp-builder /tmp/nqptp-install/usr/local/bin/nqptp /usr/local/bin/nqptp
 COPY --from=alpine-builder /tmp/shairport-ap2-install/usr/bin/shairport-sync /usr/bin/shairport-sync
 COPY --from=cliairplay-builder /tmp/cliairplay /usr/bin/cliairplay
+COPY --from=sps-pipe-builder /tmp/shairport-sync-ap1bridge /usr/bin/shairport-sync-ap1bridge
 RUN mkdir -p /config/shairport-sync /config/cast-bridge /media/music/castbridge /run/dbus
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV S6_KEEP_ENV=1
@@ -95,6 +122,7 @@ COPY remap_sinks.py /usr/sbin/remap_sinks.py
 COPY web_panel.py /usr/sbin/web_panel.py
 COPY bt_reset.py /usr/sbin/bt_reset.py
 COPY ap1_test.py /usr/sbin/ap1_test.py
+COPY ap1_bridge.py /usr/sbin/ap1_bridge.py
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
              /usr/sbin/run_stage2_hooks.sh
 ENV S6_STAGE2_HOOK=/usr/sbin/run_stage2_hooks.sh

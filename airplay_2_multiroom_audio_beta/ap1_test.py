@@ -86,6 +86,8 @@ def raop_service(ip: str, wait: float = 3.0):
         return None, {}
     port, txt, name = found["svc"]
     say(f"mDNS: {name} port {port} TXT {txt}")
+    # "MAC@Friendly name._raop._tcp.local." -> "Friendly name"
+    txt["_name"] = name.split("@", 1)[-1].split("._raop")[0]
     return port, txt
 
 
@@ -245,4 +247,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
