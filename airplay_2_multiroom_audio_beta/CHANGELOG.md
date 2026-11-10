@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.155)
+- `ap1_bridge.py --buffer SECONDS` (default 1.0): how far ahead of its play time the
+  bridge's AirPlay 2 receiver passes audio on (its pipe output buffer, with the decoded
+  buffer 0.5 s above it), which is the most lead the AirPlay 1 device's stream can get.
+  Devices that report a long latency (TuneAero: 2250 ms) may need about 2.5. Volume
+  changes reach the device that much later.
+
 ### Added (0.154)
 - `ap1_bridge.py`: the 10 s status line shows the audio level the bridge passes on
   (dBFS, or "silence"), to tell a silent device from a muted sender; and when the device
