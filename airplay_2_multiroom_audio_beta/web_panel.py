@@ -47,8 +47,8 @@ set; that restarts only that zone.
                     those (empty = not set) to a managed block in the zone's
                     <key>-ap2.custom file and restarts that zone's
                     shairport-sync; sink_zone_manager starts it again at once
-  POST /api/card/rate {"card", "rate"}: sets a sound card's sample rate ("" =
-        Auto) in card_options and reloads the card now
+  POST /api/card/rate {"card", "rate", "format"}: sets a sound card's sample
+        rate and format ("" = Auto) in card_options and reloads the card now
   POST /api/bt_reset {}: power-cycles the host's Bluetooth adapter(s) through
                     BlueZ on the host bus (bt_reset.py); BlueZ clients then
                     reconnect their sinks
@@ -680,6 +680,7 @@ def set_profile(card: str, profile: str) -> list:
 
 
 CARD_RATES = ("44100", "48000", "96000", "192000")
+CARD_FORMATS = {"s16le": "16 bit", "s24le": "24 bit", "s32le": "32 bit"}
 
 
 def card_of_sink(sink: str, pa_cards: list):
@@ -687,23 +688,27 @@ def card_of_sink(sink: str, pa_cards: list):
     return next((c["name"] for c in pa_cards if sink.startswith(card_sink_prefix(c["name"]))), None)
 
 
-def card_rate_option(options: dict, card: str) -> str:
-    """The rate set for a card in card_options, or "" (Auto)."""
+def card_option(options: dict, card: str, key: str) -> str:
+    """A module-alsa-card setting (rate, format) set for a card in
+    card_options, or "" (Auto)."""
     for ent in options.get("card_options") or []:
         if isinstance(ent, dict) and ent.get("card") == card:
-            m = re.search(r"(?:^|\s)rate=(\d+)", str(ent.get("options", "")))
-            return m.group(1) if m else ""
+            m = re.search(rf"(?:^|\s){key}=(\S+)", str(ent.get("options", "")))
+            return m.group(1).strip('"') if m else ""
     return ""
 
 
-def set_card_rate(card: str, rate: str) -> list:
-    """Sets a sound card's sample rate (module-alsa-card rate=, kept in
-    card_options so it is applied at every start) and applies it now: the
-    card is reloaded with its profile, and its zones' sinks are loaded again.
-    rate "" is Auto: the card is reloaded without a rate."""
-    rate = str(rate or "").strip()
-    if rate and rate not in CARD_RATES:
+def set_card_audio(card: str, rate: str, fmt: str) -> list:
+    """Sets a sound card's sample rate and sample format (module-alsa-card
+    rate= / format=, kept in card_options so they are applied at every
+    start) and applies them now: the card is reloaded with its profile, and
+    its zones' sinks are loaded again. "" is Auto: the card is reloaded
+    without that setting."""
+    want = {"rate": str(rate or "").strip(), "format": str(fmt or "").strip()}
+    if want["rate"] and want["rate"] not in CARD_RATES:
         raise ApplyError(f"rate must be one of {', '.join(CARD_RATES)} (or Auto)")
+    if want["format"] and want["format"] not in CARD_FORMATS:
+        raise ApplyError(f"format must be one of {', '.join(CARD_FORMATS)} (or Auto)")
     mark_busy()
     mods = rs.alsa_card_modules()
     if mods is None:
@@ -711,11 +716,16 @@ def set_card_rate(card: str, rate: str) -> list:
     if card not in mods:
         raise ApplyError(f"no card {card} loaded; reload the page")
     label = next((c["description"] for c in list_cards() if c["name"] == card), "") or card
+
+    def desc(w):
+        return ", ".join([f"{w['rate']} Hz" if w["rate"] else "default rate",
+                          CARD_FORMATS.get(w["format"], "default format")])
     idx, args = mods[card]
     lines = []
-    current = next((v.strip('"') for k, v in args if k == "rate"), "")
-    if current != rate:
-        new_args = " ".join(f"{k}={v}" for k, v in args if k != "rate") + (f" rate={rate}" if rate else "")
+    current = {k: next((v.strip('"') for a, v in args if a == k), "") for k in want}
+    if current != want:
+        new_args = " ".join([f"{k}={v}" for k, v in args if k not in want]
+                            + [f"{k}={v}" for k, v in want.items() if v])
         profile = (rs.card_profiles_now() or {}).get(card, ("", set()))[0]
         ok, out = rs.pactl("unload-module", idx)
         if not ok:
@@ -723,29 +733,31 @@ def set_card_rate(card: str, rate: str) -> list:
         ok, out = rs.pactl("load-module", "module-alsa-card", new_args)
         if not ok:
             rs.pactl("load-module", "module-alsa-card", " ".join(f"{k}={v}" for k, v in args))
-            raise ApplyError(f"{label} didn't load at {rate or 'its default rate'} ({out}); "
+            raise ApplyError(f"{label} didn't load with {desc(want)} ({out}); "
                              "it was loaded again as it was")
         if profile:
             rs.pactl("set-card-profile", card, profile)
-        lines.append(f"{label}: reloaded at {rate + ' Hz' if rate else 'its default rate (Auto)'}")
+        lines.append(f"{label}: reloaded with {desc(want)}")
     else:
-        lines.append(f"{label} is already at {rate + ' Hz' if rate else 'its default rate'}; saving it")
+        lines.append(f"{label} already has {desc(want)}; saving it")
 
     def edit_options(options):
         out, found = [], False
         for ent in options.get("card_options") or []:
             if isinstance(ent, dict) and ent.get("card") == card:
                 found = True
-                rest = " ".join(t for t in str(ent.get("options", "")).split() if not t.startswith("rate="))
-                o = (rest + (f" rate={rate}" if rate else "")).strip()
+                rest = [t for t in str(ent.get("options", "")).split()
+                        if t.split("=", 1)[0] not in want]
+                o = " ".join(rest + [f"{k}={v}" for k, v in want.items() if v])
                 if o:
                     out.append({"card": card, "options": o})
             else:
                 out.append(ent)
-        if not found and rate:
-            out.append({"card": card, "options": f"rate={rate}"})
+        if not found and any(want.values()):
+            out.append({"card": card, "options": " ".join(f"{k}={v}" for k, v in want.items() if v)})
         options["card_options"] = out
-        return [f"card_options: {label} " + (f"rate={rate}" if rate else "rate removed (Auto)")]
+        return [f"card_options: {label} " + (" ".join(f"{k}={v}" for k, v in want.items() if v)
+                                             or "rate and format removed (Auto)")]
     try:
         return lines + change_and_apply(lambda entries, descs: [], edit_options)
     finally:
@@ -1556,8 +1568,10 @@ document.querySelectorAll('button.kremove').forEach(b => b.addEventListener('cli
 }));
 document.querySelectorAll('button.kswitch').forEach(b => b.addEventListener('click', () =>
   post('api/combine/enabled', {index: Number(b.dataset.index), enabled: b.dataset.on === '1'}, 'kresult')));
-document.querySelectorAll('button.crate').forEach(b => b.addEventListener('click', () =>
-  post('api/card/rate', {card: b.dataset.card, rate: b.previousElementSibling.value})));
+document.querySelectorAll('button.crate').forEach(b => b.addEventListener('click', () => {
+  const z = b.closest('.zform'), v = k => z.querySelector(`select.crate_sel[data-k="${k}"]`).value;
+  post('api/card/rate', {card: b.dataset.card, rate: v('rate'), format: v('format')});
+}));
 document.querySelectorAll('button.sdelete').forEach(b => b.addEventListener('click', () => {
   if (b.dataset.armed) { post('api/sink/delete', {index: Number(b.dataset.index)}); return; }
   b.dataset.armed = '1'; b.textContent = 'Click again to delete';
@@ -1784,14 +1798,23 @@ def render(st: dict) -> str:
         card = card_of_sink(master, st["pa_cards"])
         if not card or not card.startswith("alsa_card."):
             return ""
-        set_ = card_rate_option(opts, card)
-        now = (re.search(r"(\d+)Hz", sink_specs.get(master, "")) or [None, ""])[1]
-        sel = "".join(f'<option value="{r}"{" selected" if r == set_ else ""}>{int(r) / 1000:g} kHz</option>'
-                      for r in CARD_RATES)
+        rate_set, fmt_set = card_option(opts, card, "rate"), card_option(opts, card, "format")
+        spec = sink_specs.get(master, "")
+        now_rate = (re.search(r"(\d+)Hz", spec) or [None, ""])[1]
+        now_fmt = spec.split()[0] if spec else ""
+        now_bits = (re.search(r"(\d+)", now_fmt) or [None, ""])[1]
+        rsel = "".join(f'<option value="{r}"{" selected" if r == rate_set else ""}>{int(r) / 1000:g} kHz</option>'
+                       for r in CARD_RATES)
+        fsel = "".join(f'<option value="{f}"{" selected" if f == fmt_set else ""}>{lab}</option>'
+                       for f, lab in CARD_FORMATS.items())
         return (f'<div style="flex:0 0 auto;margin-left:14px"><label>Card rate'
-                + (f' (now {int(now) / 1000:g} kHz)' if now else "") + '</label>'
-                f'<div style="display:flex;gap:6px"><select class="crate_sel" aria-label="Sample rate for the card">'
-                f'<option value=""{" selected" if not set_ else ""}>Auto</option>{sel}</select>'
+                + (f' (now {int(now_rate) / 1000:g} kHz)' if now_rate else "") + '</label>'
+                f'<select class="crate_sel" data-k="rate" aria-label="Sample rate for the card">'
+                f'<option value=""{" selected" if not rate_set else ""}>Auto</option>{rsel}</select></div>'
+                f'<div style="flex:0 0 auto;margin-left:10px"><label>Card format'
+                + (f' (now {now_bits} bit)' if now_bits else "") + '</label>'
+                f'<div style="display:flex;gap:6px"><select class="crate_sel" data-k="format" aria-label="Sample format for the card">'
+                f'<option value=""{" selected" if not fmt_set else ""}>Auto</option>{fsel}</select>'
                 f'<button class="btn sec sm crate" type="button" data-card="{e(card)}" '
                 f'title="Reloads the whole card: every zone on it restarts">Set</button></div></div>')
 
@@ -1984,7 +2007,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/players":
                 lines = apply_players(body.get("rows"))
             elif path == "/api/card/rate":
-                lines = set_card_rate(str(body.get("card", "")), str(body.get("rate", "")))
+                lines = set_card_audio(str(body.get("card", "")), str(body.get("rate", "")),
+                                       str(body.get("format", "")))
             elif path == "/api/sink/delete":
                 lines = delete_sink(body.get("index"))
             elif path == "/api/combine/enabled":

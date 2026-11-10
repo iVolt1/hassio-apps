@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.166)
+- **Card format next to Card rate.** A sound-card zone's **More** now also has **Card
+  format** (Auto, 16, 24 or 32 bit), with the format the card runs at now. **Set** applies
+  rate and format together: the card is reloaded with both (other card options and the
+  profile kept), its zones' sinks come back, and both are kept in `card_options`
+  (`format=s16le|s24le|s32le`). Auto removes the setting. Leave it on Auto unless a device
+  needs a particular format: zone volume is done in software, so more bits keep quiet
+  listening clean.
+
 ### Added (0.165)
 - **Card rate in the web panel.** A sound-card zone's **More** now has **Card rate**
   (Auto, 44.1, 48, 96 or 192 kHz) with the rate the card runs at now. **Set** reloads
