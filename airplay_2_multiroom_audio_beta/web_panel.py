@@ -80,6 +80,7 @@ PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
 ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").split(","))
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
+AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))   # ap1_bridge_manager.py
 ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
 SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
@@ -687,6 +688,23 @@ def load_disabled_zones() -> set:
     return {str(k) for k in keys} if isinstance(keys, list) else set()
 
 
+def ap1_devices() -> list:
+    """AirPlay 1 devices the bridge manager found, with their settings
+    (settings.json, written here) and bridge state (status.json)."""
+    def rd(name, default):
+        try:
+            return json.loads((AP1_DIR / name).read_text())
+        except (OSError, ValueError):
+            return default
+    settings, status = rd("settings.json", {}), rd("status.json", {})
+    out = []
+    for d in rd("discovered.json", []):
+        if isinstance(d, dict) and d.get("key"):
+            out.append({**d, "settings": settings.get(d["key"], {}),
+                        "status": status.get(d["key"], {})})
+    return sorted(out, key=lambda d: d["name"].lower())
+
+
 def load_options() -> dict:
     try:
         return json.loads(OPTIONS_FILE.read_text())
@@ -1049,6 +1067,80 @@ def player_sink_name(row: dict, key: str, rename: bool = True) -> str:
     return sink
 
 
+def apply_ap1_rows(rows: list, options: dict) -> tuple:
+    """AirPlay 1 bridge rows: AirPlay on/off (enabled_zones, in options) and
+    the name / offset / buffer / lead settings (AP1_DIR/settings.json, which
+    ap1_bridge_manager.py watches and restarts the bridge for).
+    Returns (lines, options changed)."""
+    devices = {d["key"]: d for d in ap1_devices()}
+    try:
+        settings = json.loads((AP1_DIR / "settings.json").read_text())
+    except (OSError, ValueError):
+        settings = {}
+    lines, changed_opts, changed_settings = [], False, False
+
+    def number(row, field, label, kind, lo, hi):
+        v = str(row.get(field, "") or "").strip()
+        if not v:
+            return None
+        try:
+            n = kind(v)
+        except ValueError:
+            raise ApplyError(f"{label}: '{v}' is not a number")
+        if not lo <= n <= hi:
+            raise ApplyError(f"{label} must be between {lo} and {hi}")
+        return n
+
+    for row in rows:
+        key = str(row.get("key", ""))
+        dev = devices.get(key)
+        if not dev:
+            raise ApplyError(f"{key}: that AirPlay 1 device isn't listed any more; reload the page")
+        label = dev["name"]
+        if row.get("airplay_on") is not None:
+            was = rs.zone_is_on(options, key)
+            if rs.set_zone_on(options, key, bool(row["airplay_on"])):
+                changed_opts = True
+            if was != bool(row["airplay_on"]):
+                lines.append(f"{label}: AirPlay {'on' if row['airplay_on'] else 'off'} "
+                             "(AirPlay 1 bridge)")
+        s_ = dict(settings.get(key, {}))
+        if "name" in row:
+            name = str(row["name"]).strip()
+            if not name or '"' in name:
+                raise ApplyError(f"{label}: the player name can't be empty or contain \"")
+            if name == dev["name"]:
+                s_.pop("name", None)
+            else:
+                s_["name"] = name
+        if row.get("custom"):
+            for field, skey, lab, kind, lo, hi in (
+                    ("offset_ms", "offset", "Offset (ms)", int, -3000, 3000),
+                    ("ap1_buffer", "buffer", "Buffer (s)", float, 0.5, 5.0),
+                    ("ap1_lead", "raop_lead", "AirPlay 1 lead (ms)", int, 200, 3000)):
+                if field in row:
+                    n = number(row, field, f"{label}: {lab}", kind, lo, hi)
+                    if n is None:
+                        s_.pop(skey, None)
+                    else:
+                        s_[skey] = n
+        if s_ != settings.get(key, {}):
+            if s_:
+                settings[key] = s_
+            else:
+                settings.pop(key, None)
+            changed_settings = True
+            lines.append(f"{label}: bridge settings "
+                         + (", ".join(f"{k} {v}" for k, v in s_.items()) or "back to defaults")
+                         + " (the bridge restarts)")
+    if changed_settings:
+        AP1_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = AP1_DIR / "settings.json.tmp"
+        tmp.write_text(json.dumps(settings, indent=1))
+        os.replace(tmp, AP1_DIR / "settings.json")
+    return lines, changed_opts
+
+
 def apply_players(rows: list) -> list:
     """Applies the zone table's changed rows in one pass: sink renames and
     on/off (remap_sinks and combine_sinks), AirPlay on/off (disabled_zones),
@@ -1067,6 +1159,9 @@ def apply_players(rows: list) -> list:
     running = {z["key"]: z for z in zones()}
     options.setdefault("remap_sinks", remaps)
     cards = None
+    ap1_rows = [r for r in rows if isinstance(r, dict) and r.get("kind") == "ap1"]
+    rows = [r for r in rows if not (isinstance(r, dict) and r.get("kind") == "ap1")]
+    ap1_lines, ap1_changed = apply_ap1_rows(ap1_rows, options) if ap1_rows else ([], False)
 
     plan, renames, created = [], {}, []
     for row in rows:
@@ -1134,7 +1229,7 @@ def apply_players(rows: list) -> list:
     if clash:
         raise ApplyError(f"{', '.join(clash)} is already the name of another sink")
 
-    lines, restart, opts_changed = [], [], False
+    lines, restart, opts_changed = list(ap1_lines), [], ap1_changed
     for row, kind, key, new, entry in plan:
         label = new if new == key else f"{key} -> {new}"
         if kind == "new":
@@ -1321,7 +1416,7 @@ if (applyBtn) applyBtn.addEventListener('click', () => {
     if (v('name') && isChanged(v('name'))) { row.name = v('name').value.trim(); row.default = v('name').dataset.default; }
     if (!v('airplay_on').disabled) row.airplay_on = v('airplay_on').checked;
     if (!v('sink_on').disabled) row.sink_on = v('sink_on').checked;
-    const cf = ['offset_ms', 'volume_max_db'].map(v).filter(Boolean);
+    const cf = ['offset_ms', 'volume_max_db', 'ap1_buffer', 'ap1_lead'].map(v).filter(Boolean);
     if (cf.some(isChanged)) { row.custom = true; cf.forEach(x => row[x.dataset.f] = x.value.trim()); }
     rows.push(row);
   });
@@ -1515,9 +1610,13 @@ def render(st: dict) -> str:
             return ""
 
     def player_row(kind, key, name, name_editable, index, sink_on, sink_switchable,
-                   channels, card, sysname, status, more_actions, note="", extra=""):
+                   channels, card, sysname, status, more_actions, note="", extra="", ap1=None):
         z = zmap.pop(key, None)
-        ov = z["overrides"] if z else read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
+        if ap1 is not None:
+            # AirPlay 1 bridge: settings and state come from ap1_bridge_manager.py.
+            ov = {"name": ap1["settings"].get("name", "")} if ap1["settings"].get("name") else {}
+        else:
+            ov = z["overrides"] if z else read_custom(ZONE_CONFIG_DIR / f"{key}-ap2.custom")
         cast = kind == "cast"
         cast_switch = cast and rs.OPT_IN_FILE.exists()
         ap_on = sink_on and kind != "new" and rs.zone_is_on(opts, key) and (cast_switch or not cast)
@@ -1533,6 +1632,14 @@ def render(st: dict) -> str:
             st_txt = "AirPlay off"
         else:
             st_txt = status or "No zone running"
+        if ap1 is not None and ap_on:
+            b = ap1["status"]
+            st_txt = {"playing": "Playing", "idle": "Idle", "ready": "Ready",
+                      "connecting": "Connecting", "starting": "Starting",
+                      "waiting": '<span class="warn">Waiting (see log)</span>'}.get(
+                b.get("state"), "Starting") if b else "Starting"
+            if b and b.get("since") and b.get("state") in ("playing", "idle", "ready"):
+                st_txt += f' · {e(ago(int(time.time() - b["since"])))}'
         if status and status.startswith("<"):
             st_txt = status          # a warning wins
         rid = f"pr_{len(prows)}"
@@ -1541,6 +1648,8 @@ def render(st: dict) -> str:
         # The name the player has in AirPlay / Music Assistant.
         if kind in ("bluetooth", "cast") and z and not ov.get("name"):
             default = z["name"]
+        elif ap1 is not None:
+            default = name                    # the device's own name, as it is
         else:
             default = name.replace("_", " ")
         shown = ov.get("name") or default
@@ -1557,9 +1666,12 @@ def render(st: dict) -> str:
         sk_box = (f'<input type="checkbox" class="pv sk" data-f="sink_on"{" checked" if sink_on else ""}'
                   f'{"" if sink_switchable else " disabled"} aria-label="Sink on for {e(name)}"'
                   + ("" if sink_switchable else ' title="Not switchable here"') + '>')
+        off_val = (str(ap1["settings"].get("offset", "")) if ap1 is not None else offset_ms(ov))
         off_html = ("—" if cast else
-                    f'<input class="pv num" data-f="offset_ms" inputmode="numeric" value="{e(offset_ms(ov))}" '
-                    f'placeholder="0" aria-label="Latency offset (ms) for {e(name)}">')
+                    f'<input class="pv num" data-f="offset_ms" inputmode="numeric" value="{e(off_val)}" '
+                    f'placeholder="0" aria-label="Latency offset (ms) for {e(name)}"'
+                    + (' title="ms the device plays late by itself; it is started that much earlier"'
+                       if ap1 is not None else "") + '>')
         more = "" if cast else f'<button class="btn sec sm pmore" type="button" data-target="{rid}">More</button>'
         sysn = (f'<span class="mono">{e(sysname)}</span><button class="copy" aria-label="Copy system name" '
                 f'data-text="{e(sysname)}">{COPY_ICON}</button>') if sysname else '<span class="mono">—</span>'
@@ -1568,8 +1680,20 @@ def render(st: dict) -> str:
             f'<tr class="prow" id="{rid}_r"{data}{dim}><td>{name_html}</td><td>{e(channels)}</td>'
             f'<td class="ck">{ap_box}</td><td class="ck">{sk_box}</td><td>{off_html}</td>'
             f'<td style="white-space:nowrap">{st_txt}{more}</td><td class="sys">{sysn}</td>'
-            f'<td>{e(card)}</td><td>{e((z or {}).get("port") or "—")}</td></tr>')
-        if not cast:
+            f'<td>{e(card)}</td><td>{e(str((z or {}).get("port") or (ap1 or {}).get("status", {}).get("port") or "—"))}</td></tr>')
+        if ap1 is not None:
+            s_ = ap1["settings"]
+            prows.append(
+                f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
+                f'<div style="flex:0 0 160px"><label>Buffer (s)</label>'
+                f'<input class="pv" data-f="ap1_buffer" inputmode="decimal" value="{e(str(s_.get("buffer", "")))}" placeholder="1.0"></div>'
+                f'<div style="flex:0 0 180px"><label>AirPlay 1 lead (ms)</label>'
+                f'<input class="pv" data-f="ap1_lead" inputmode="numeric" value="{e(str(s_.get("raop_lead", "")))}" placeholder="500"></div></div>'
+                f'<p class="sub" style="margin:10px 0 0;font-size:12px">These save with Apply and restart the bridge. '
+                f'Buffer: how far ahead audio is passed on (a start needs lead + offset + 0.3 s; raised automatically). '
+                f'AirPlay 1 lead: how far ahead the device is sent audio (it is told this + 250 ms as its latency). '
+                f'Log: {e((ap1["status"] or {}).get("log", "-"))}</p></td></tr>')
+        elif not cast:
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
                 f'<div style="display:flex;gap:0;align-items:flex-end">{more_actions}</div>'
@@ -1621,6 +1745,10 @@ def render(st: dict) -> str:
         player_row("combine", c["name"], c["name"], managed, c["index"], c.get("enabled", True), managed,
                    "Combine: " + mem, c["description"] or "—", None, status, acts,
                    "" if managed else "unmanaged")
+    for d in ap1_devices():
+        player_row("ap1", d["key"], d["name"], True, None, True, False,
+                   "AirPlay 1", f'AirPlay 1 bridge → {d["address"]}', d["name"], "", "",
+                   d.get("model", ""), "", ap1=d)
     for z in [z for z in st["zones"] if z["key"] in zmap]:
         kind = {"bluetooth": "bluetooth", "cast": "cast"}.get(z["kind"], "sink")
         player_row(kind, z["key"], z["key"] if kind != "cast" else z["name"],

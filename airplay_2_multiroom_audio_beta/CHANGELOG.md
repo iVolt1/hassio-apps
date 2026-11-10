@@ -5,6 +5,25 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.161)
+- **AirPlay 1 devices in the web panel (AirPlay 2 -> AirPlay 1 bridge).** A new service,
+  `ap1_bridge_manager.py`, keeps listening for AirPlay 1-only devices on the network
+  (devices that also have AirPlay 2, and this add-on's own receivers, are left out) and
+  lists them in *AirPlay 2 receivers and Sinks* as **AirPlay 1** rows, named after the
+  device. Tick **AirPlay** and Apply: the device gets an AirPlay 2 receiver of its own
+  name that plays in step with your other rooms (`ap1_bridge.py`, now run by the
+  service; no `docker exec` needed). Per device:
+  - **Player name**: the bridged player's name (default: the device's own name);
+  - **Offset (ms)**: how late the device plays by itself; it is started that much
+    earlier (TuneAero on Windows: about 330, for Apple senders);
+  - under **More**: **Buffer (s)** (default 1.0, raised automatically when lead + offset
+    need more) and **AirPlay 1 lead (ms)** (default 500).
+  Changes restart that device's bridge; a bridge that stops is restarted. Status shows
+  Playing / Idle / Ready / Connecting / Waiting, and the log is
+  `/config/shairport-sync/logs/<player name>-ap1.log` (the manager's own log is
+  `/config/ap1-bridge/ap1_bridge_manager.log`). Settings live in
+  `/config/ap1-bridge/settings.json`. Off by default, like Cast.
+
 ### Fixed (0.159)
 - AirPlay 1 bridge: with `--offset`, a start needs blocks that much further ahead, but
   `--buffer 1.0` delivers them only ~0.99 s ahead, so with `--raop-lead 500 --offset 330`
