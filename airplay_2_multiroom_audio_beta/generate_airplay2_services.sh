@@ -40,6 +40,7 @@ mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
 : > /config/shairport-sync/logs/sink_zone_manager.log
 : > /config/cast-bridge/logs/cast_bridge_manager.log
 mkdir -p /config/ap1-bridge && : > /config/ap1-bridge/ap1_bridge_manager.log
+mkdir -p /config/line-in && : > /config/line-in/linein_manager.log
 : > /config/shairport-sync/logs/web_panel.log
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
@@ -488,6 +489,22 @@ exec ${NETNS_EXEC}python3 /usr/sbin/ap1_bridge_manager.py >> /config/ap1-bridge/
 EOF
     chmod +x "${AP1_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-ap1bridge-manager"
+fi
+
+# Line inputs -> Music Assistant as Sendspin sources (see linein_manager.py).
+# In the host's network (no NETNS_EXEC): Music Assistant connects to it there,
+# and its mDNS advert (python-zeroconf) stays clear of the zones' avahi.
+LINEIN_MANAGER_SERVICE="${BASE_DIR}/airplay2-linein-manager"
+if [ ! -d "$LINEIN_MANAGER_SERVICE" ]; then
+    mkdir -p "$LINEIN_MANAGER_SERVICE" "${LINEIN_MANAGER_SERVICE}/dependencies.d"
+    echo "longrun" > "${LINEIN_MANAGER_SERVICE}/type"
+    cat > "${LINEIN_MANAGER_SERVICE}/run" <<EOF
+#!/usr/bin/with-contenv bashio
+mkdir -p /config/line-in
+exec python3 /usr/sbin/linein_manager.py >> /config/line-in/linein_manager.log 2>&1
+EOF
+    chmod +x "${LINEIN_MANAGER_SERVICE}/run"
+    touch "${CONTENTS_DIR}/airplay2-linein-manager"
 fi
 
 # One manager for every PulseAudio-sink zone (see the comment above).

@@ -6,3 +6,6 @@
 # multicast traffic.
 pychromecast>=14.0.0
 zeroconf>=0.130.0
+# For linein_manager.py: line inputs as Sendspin sources for Music Assistant.
+# No extras: the inputs stream PCM, which needs no PyAV encoder.
+aiosendspin==10.3.0
