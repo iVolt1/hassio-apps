@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.163)
+- **Dropout finder in the AirPlay 1 bridge log.** The bridge now logs any short
+  near-silent stretch (10 ms to 3 s) in the audio it passes on, with the clock time it
+  is heard in the group: `near-silence in the stream: 120 ms, heard at 09:41:07.512`.
+  A line matching a dropout heard in every room means the gap was already in the
+  audio the sender sent (the receivers play it faithfully); no line means the
+  dropout happened after the bridge. Quiet passages and track gaps also show up, so
+  match the times against what you heard.
+
 ### Added (0.162)
 - **Track info on AirPlay 1 devices.** The AirPlay 1 bridge now passes on what's
   playing: title, artist, album, track length, cover art and progress, taken from
