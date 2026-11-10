@@ -62,18 +62,11 @@ def raop_service(ip: str, wait: float = 8.0):
     except ImportError:
         return None, {}
     found = {}
+    names = []      # service names seen; resolved below, outside zeroconf's thread
 
     class L:
         def add_service(self, zc, type_, name):
-            info = zc.get_service_info(type_, name, timeout=2000)
-            friendly = name.split("@", 1)[-1].split("._raop")[0]
-            if info and (ip in info.parsed_addresses()
-                         or ip.lower() in friendly.lower()
-                         or ip.lower().replace(" ", "_") in friendly.lower()):
-                txt = {k.decode(): (v.decode() if v else "") for k, v in info.properties.items()}
-                v4 = [a for a in info.parsed_addresses() if ":" not in a]
-                txt["_addr"] = (v4 or info.parsed_addresses())[0]
-                found["svc"] = (info.port, txt, name)
+            names.append(name)
 
         def update_service(self, *a):
             pass
@@ -81,11 +74,29 @@ def raop_service(ip: str, wait: float = 8.0):
         def remove_service(self, *a):
             pass
 
+    def matches(name, info):
+        friendly = name.split("@", 1)[-1].split("._raop")[0]
+        return (ip in info.parsed_addresses() or ip.lower() in friendly.lower()
+                or ip.lower().replace(" ", "_") in friendly.lower())
+
     zc = Zeroconf()
     try:
         ServiceBrowser(zc, "_raop._tcp.local.", L())
         end = time.time() + wait
+        done = set()
         while time.time() < end and "svc" not in found:
+            for name in [n for n in names if n not in done]:
+                done.add(name)
+                try:
+                    info = zc.get_service_info("_raop._tcp.local.", name, timeout=1500)
+                except Exception:          # a slow or odd responder; skip it
+                    info = None
+                if info and matches(name, info):
+                    txt = {k.decode(): (v.decode() if v else "") for k, v in info.properties.items()}
+                    v4 = [x for x in info.parsed_addresses() if ":" not in x]
+                    txt["_addr"] = (v4 or info.parsed_addresses())[0]
+                    found["svc"] = (info.port, txt, name)
+                    break
             time.sleep(0.1)
     finally:
         zc.close()
