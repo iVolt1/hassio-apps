@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.175)
+
+- Panel: AirPlay 1 bridges have a "Remove bridge" button under More. It
+  switches the bridge off and takes it off the list, even while the device
+  is still on the network; "List again" under the table brings it back.
+- Panel: combine sinks this add-on didn't load (unmanaged) can now be
+  removed too ("Remove combine sink" unloads it). Combine sinks the add-on
+  manages already had this button under More.
+
 ### Fixed (0.174)
 
 - AirPlay 1 bridge: a device that also advertises an address on another

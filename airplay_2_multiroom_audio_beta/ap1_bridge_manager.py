@@ -232,7 +232,8 @@ def main():
             write_json(DISCOVERED_FILE, list(devices.values()))
             published = devices
         settings = read_json(SETTINGS_FILE, {})
-        wanted = enabled_keys() & set(devices)
+        wanted = {k for k in enabled_keys() & set(devices)
+                  if not settings.get(k, {}).get("hidden")}   # removed in the panel
 
         for key in list(bridges):
             b = bridges[key]
