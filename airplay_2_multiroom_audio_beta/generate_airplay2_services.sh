@@ -121,7 +121,16 @@ if [ -n "$AP2_IP" ]; then
         [ "$tries" -gt 0 ] && echo "ap2: macvlan ap2mv created after $((tries * 2)) s"
         ip link set ap2mv netns "$AP2_NS" || { echo "ap2: moving ap2mv into the namespace failed"; return 1; }
         ip -n "$AP2_NS" link set lo up || { echo "ap2: setting lo up in the namespace failed"; return 1; }
-        ip -n "$AP2_NS" link set ap2mv up || { echo "ap2: setting ap2mv up failed"; return 1; }
+        if ! up_err="$(ip -n "$AP2_NS" link set ap2mv up 2>&1)"; then
+            echo "ap2: setting ap2mv up failed: ${up_err}"
+            case "$up_err" in
+                *"in use"*)
+                    echo "ap2: another network interface on ${AP2_PARENT} is already up with MAC ${AP2_MAC:-(random)} --" \
+                         "is a second copy of this add-on (or another add-on) running with the same ap2_mac / ap2_ip?" \
+                         "Stop it, or give each copy its own ap2_mac and ap2_ip." ;;
+            esac
+            return 1
+        fi
         ip -n "$AP2_NS" addr add "$AP2_IP" dev ap2mv || { echo "ap2: adding $AP2_IP to ap2mv failed"; return 1; }
         if [ -n "$AP2_GW" ]; then
             ip -n "$AP2_NS" route add default via "$AP2_GW" || { echo "ap2: adding the default route failed"; return 1; }
