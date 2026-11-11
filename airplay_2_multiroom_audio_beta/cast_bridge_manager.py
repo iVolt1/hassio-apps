@@ -53,6 +53,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -77,10 +78,25 @@ PORT_MAP_LOCK_FILE = CONFIG_DIR / ".port_map.lock"
 CASTBRIDGE_DIR = Path("/config/cast-bridge")
 HTTP_PORT_MAP_FILE = CASTBRIDGE_DIR / "http_port_map.txt"
 
-# Shared "media:rw" mount — same host directory the old separate Cast
-# Bridge addon used, kept as-is since nothing about that path was
-# actually part of the config-mismatch problem.
-PIPE_DIR = Path("/media/music/castbridge")
+# The zones' audio FIFOs (shairport-sync pipe backend -> cast_bridge_zone.py).
+# On /dev/shm (tmpfs): every read or write on a FIFO updates its inode times,
+# which on a disk filesystem can wait seconds for a journal commit while the
+# disk is busy, stalling the audio (the same reason Music Assistant moved its
+# FIFOs to /dev/shm). The zones run in the ap2 network namespace but share
+# this container's /dev/shm. They used to live in /media/music/castbridge.
+def _pipe_dir() -> Path:
+    for base in ("/dev/shm", tempfile.gettempdir()):
+        d = Path(base) / "castbridge"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except OSError:
+            continue
+    return Path("/media/music/castbridge")
+
+
+PIPE_DIR = _pipe_dir()
+OLD_PIPE_DIR = Path("/media/music/castbridge")
 
 # Set by generate_airplay2_services.sh from the default-route interface (or an
 # AIRPLAY_INTERFACE override). Empty means "not restricted": no interface line
@@ -383,6 +399,13 @@ def main():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CASTBRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
+    log.info("audio pipes in %s", PIPE_DIR)
+    if PIPE_DIR != OLD_PIPE_DIR:       # FIFOs left in the old place on the disk
+        for p in OLD_PIPE_DIR.glob("*.pipe"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     disc = Discovery()
     log.info("Discovering Cast devices (%ds), then listening for new ones...",

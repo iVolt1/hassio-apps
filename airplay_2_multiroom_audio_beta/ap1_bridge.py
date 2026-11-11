@@ -47,11 +47,13 @@ Stop it with Ctrl-C.
 
 import argparse
 import array
+import atexit
 import base64
 import collections
 import math
 import os
 import re
+import shutil
 import signal
 import struct
 import subprocess
@@ -70,6 +72,10 @@ TIMED, FLUSH, STOP = 1, 2, 4
 RATE, BPF = 44100, 4                  # S16_LE stereo, what cliairplay takes by default
 DEADBAND_MS = 1.0                     # drift corrected a frame at a time beyond this
 GAP_MS = 5.0                          # a jump beyond this is filled / skipped at once
+# FIFOs (audio, metadata, cliairplay's commands) go on tmpfs: a FIFO read or
+# write updates its inode times, which on a disk filesystem can wait seconds
+# for a journal commit while the disk is busy, stalling the audio.
+RUNTIME_DIR = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
 RESYNC_MS = 2000.0                    # flush + start again beyond this
 QUIET_WIN = 220                       # frames (5 ms) per near-silence test
 QUIET_SPAN = 16                       # max-min of a window this small: near-silence (dither)
@@ -89,7 +95,7 @@ class Sender:
         self.started = {}
         self.verbose = verbose
         self.connected_at = time.time()
-        tmp = tempfile.mkdtemp(prefix="ap1bridge-")
+        tmp = self.tmp = tempfile.mkdtemp(prefix="ap1bridge-", dir=RUNTIME_DIR)
         self.pipe = os.path.join(tmp, "cmd")
         os.mkfifo(self.pipe)
         cmd = ["cliairplay", "--protocol", "raop", "--port", str(port), "--volume", "100",
@@ -174,6 +180,7 @@ class Sender:
                 f.close()
             except OSError:
                 pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 class Metadata:
@@ -621,7 +628,8 @@ def main() -> int:
     raop_port = a.raop_port or port or 5000
     name = a.name or (txt.get("_name") or f"AirPlay 1 {a.ip}") + " AP2"
 
-    work = tempfile.mkdtemp(prefix="ap1bridge-sps-")
+    work = tempfile.mkdtemp(prefix="ap1bridge-sps-", dir=RUNTIME_DIR)
+    atexit.register(shutil.rmtree, work, True)   # tmpfs is memory: leave nothing behind
     fifo = os.path.join(work, "audio")
     os.mkfifo(fifo)
     mfifo = os.path.join(work, "metadata")

@@ -5,6 +5,17 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.169)
+- **Audio pipes moved off the disk.** The Cast zones' audio FIFOs (were in
+  `/media/music/castbridge`) and the AirPlay 1 bridge's FIFOs (audio, metadata,
+  cliairplay commands; were in the container's `/tmp`) now live on `/dev/shm`, which is
+  memory. Every read or write on a FIFO updates its inode times, and on a disk that can
+  wait seconds for a journal commit while the disk is busy (recorder, backups,
+  BirdNET-Go), stalling the audio. Music Assistant made the same change (server PR
+  #7514). Sound-card and Bluetooth zones were not affected (they use PulseAudio's socket).
+  Old FIFOs in `/media/music/castbridge` are removed at start, and the bridge now cleans
+  up its temporary files when it stops.
+
 ### Fixed (0.168)
 - **AirPlay 1 devices that stay silent.** The AirPlay 1 bridge now encrypts the audio when
   the device offers encryption (`et` includes 1), as Music Assistant does by default.
