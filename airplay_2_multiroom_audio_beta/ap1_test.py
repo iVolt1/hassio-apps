@@ -146,7 +146,7 @@ def main() -> int:
     for k in ("et", "md", "am", "pk", "pw", "cn"):
         if txt.get(k):
             cmd += [f"--{k}", txt[k]]
-    tmp = tempfile.mkdtemp(prefix="ap1test-")
+    tmp = tempfile.mkdtemp(prefix="ap1test-", dir="/dev/shm" if os.access("/dev/shm", os.W_OK) else None)
     pipe = os.path.join(tmp, "cmd")
     os.mkfifo(pipe)
     cmd += ["--cmdpipe", pipe, a.ip]
