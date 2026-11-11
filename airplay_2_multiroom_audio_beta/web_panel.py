@@ -40,6 +40,9 @@ set; that restarts only that zone.
                     combine sink (two or more member sinks of any kind)
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
   POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
+  POST /api/combine/unload {"name"}: unloads an unmanaged combine sink now
+  POST /api/ap1/hide {"key", "hidden"}: removes an AirPlay 1 bridge from the
+                    list (and switches it off), or lists it again
   POST /api/combine/enabled {"index", "enabled"}: switches a combine_sinks
                     entry off (kept, not loaded) or on
                     (all four then the same as apply)
@@ -996,6 +999,55 @@ def remove_combine(index) -> list:
     return change_and_apply(lambda entries, descs: [], edit_options)
 
 
+def unload_combine(name: str) -> list:
+    """Unloads an unmanaged combine sink (one this add-on didn't load)."""
+    if not any(c["name"] == name and not c["managed"] for c in state()["combine_sinks"]):
+        raise ApplyError(f"{name} is not an unmanaged combine sink; reload the page")
+    idx = rs.COMBINE_MODS.get(name, (None,))[0]
+    if idx is None:
+        raise ApplyError(f"{name} isn't loaded any more; reload the page")
+    res = subprocess.run(["pactl", "unload-module", str(idx)], capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise ApplyError(f"unloading {name} failed: {(res.stderr or res.stdout).strip()}")
+    return [f"unloaded combine sink {name} (if something else loads it again, it comes back)"]
+
+
+def hide_ap1(key: str, hidden: bool) -> list:
+    """Removes an AirPlay 1 bridge from the zone list and switches it off
+    (settings.json "hidden", which ap1_bridge_manager.py also honours), or
+    lists it again (still off)."""
+    dev = next((d for d in ap1_devices() if d["key"] == key), None)
+    if not dev:
+        raise ApplyError(f"{key}: that AirPlay 1 device isn't listed any more; reload the page")
+    try:
+        settings = json.loads((AP1_DIR / "settings.json").read_text())
+    except (OSError, ValueError):
+        settings = {}
+    s_ = dict(settings.get(key, {}))
+    if hidden:
+        s_["hidden"] = True
+    else:
+        s_.pop("hidden", None)
+    if s_:
+        settings[key] = s_
+    else:
+        settings.pop(key, None)
+    AP1_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AP1_DIR / "settings.json.tmp"
+    tmp.write_text(json.dumps(settings, indent=1))
+    os.replace(tmp, AP1_DIR / "settings.json")
+    if not hidden:
+        return [f"{dev['name']}: listed again (AirPlay is off; switch it on to bridge it)"]
+
+    def edit_options(options):
+        if rs.zone_is_on(options, key):
+            rs.set_zone_on(options, key, False)
+            return [f"{dev['name']}: AirPlay off (AirPlay 1 bridge)"]
+        return []
+    lines = change_and_apply(lambda entries, descs: [], edit_options)
+    return [f"{dev['name']}: bridge removed from the list"] + [l for l in lines if l != "nothing changed"]
+
+
 def adopt_combine(name: str) -> list:
     c = next((c for c in state()["combine_sinks"] if c["name"] == name and not c["managed"]), None)
     if not c or not c.get("adoptable"):
@@ -1577,6 +1629,18 @@ document.querySelectorAll('button.sdelete').forEach(b => b.addEventListener('cli
   b.dataset.armed = '1'; b.textContent = 'Click again to delete';
   setTimeout(() => { delete b.dataset.armed; b.textContent = 'Delete sink'; }, 4000);
 }));
+document.querySelectorAll('button.kunload').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.armed) { post('api/combine/unload', {name: b.dataset.name}); return; }
+  b.dataset.armed = '1'; b.textContent = 'Click again to remove';
+  setTimeout(() => { delete b.dataset.armed; b.textContent = 'Remove combine sink'; }, 4000);
+}));
+document.querySelectorAll('button.ahide').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.armed) { post('api/ap1/hide', {key: b.dataset.key, hidden: true}); return; }
+  b.dataset.armed = '1'; b.textContent = 'Click again to remove';
+  setTimeout(() => { delete b.dataset.armed; b.textContent = 'Remove bridge'; }, 4000);
+}));
+document.querySelectorAll('button.aunhide').forEach(b => b.addEventListener('click', () =>
+  post('api/ap1/hide', {key: b.dataset.key, hidden: false})));
 document.querySelectorAll('button.kadopt').forEach(b => b.addEventListener('click', () =>
   post('api/combine/adopt', {name: b.dataset.name})));
 document.querySelectorAll('button.adopt').forEach(b => b.addEventListener('click', () =>
@@ -1808,11 +1872,14 @@ def render(st: dict) -> str:
                 f'<div style="flex:0 0 160px"><label>Buffer (s)</label>'
                 f'<input class="pv" data-f="ap1_buffer" inputmode="decimal" value="{e(str(s_.get("buffer", "")))}" placeholder="1.0"></div>'
                 f'<div style="flex:0 0 180px"><label>AirPlay 1 lead (ms)</label>'
-                f'<input class="pv" data-f="ap1_lead" inputmode="numeric" value="{e(str(s_.get("raop_lead", "")))}" placeholder="500"></div></div>'
+                f'<input class="pv" data-f="ap1_lead" inputmode="numeric" value="{e(str(s_.get("raop_lead", "")))}" placeholder="500"></div>'
+                f'<div style="display:flex;align-items:flex-end"><button class="btn sec sm ahide" type="button" '
+                f'data-key="{e(key)}">Remove bridge</button></div></div>'
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">These save with Apply and restart the bridge. '
                 f'Buffer: how far ahead audio is passed on (a start needs lead + offset + 0.3 s; raised automatically). '
                 f'AirPlay 1 lead: how far ahead the device is sent audio (it is told this + 250 ms as its latency). '
-                f'Log: {e((ap1["status"] or {}).get("log", "-"))}</p></td></tr>')
+                f'Log: {e((ap1["status"] or {}).get("log", "-"))}. '
+                f'Remove bridge: switches it off and takes it off this list (it can be listed again below the table).</p></td></tr>')
         elif not cast:
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
@@ -1857,15 +1924,19 @@ def render(st: dict) -> str:
                   if not c["loaded"] and c.get("enabled", True) else "")
         if managed:
             acts = f'<button class="btn sec sm kremove" data-index="{c["index"]}">Remove combine sink</button>'
-        elif c.get("adoptable"):
-            acts = f'<button class="btn sec sm kadopt" data-name="{e(c["name"])}">Adopt</button>'
         else:
-            acts = ""
+            acts = (f'<button class="btn sec sm kadopt" data-name="{e(c["name"])}">Adopt</button>'
+                    if c.get("adoptable") else "")
+            acts += (f'<button class="btn sec sm kunload" data-name="{e(c["name"])}"'
+                     + (' style="margin-left:8px"' if acts else "") + '>Remove combine sink</button>')
+
         mem = ", ".join(label.get(m, m) + (" (missing)" if m in c["missing"] else "") for m in c["members"])
         player_row("combine", c["name"], c["name"], managed, c["index"], c.get("enabled", True), managed,
                    "Combine: " + mem, c["description"] or "—", None, status, acts,
                    "" if managed else "unmanaged")
-    for d in ap1_devices():
+    ap1_list = ap1_devices()
+    ap1_hidden = [d for d in ap1_list if d["settings"].get("hidden")]
+    for d in [d for d in ap1_list if not d["settings"].get("hidden")]:
         player_row("ap1", d["key"], d["name"], True, None, True, False,
                    "AirPlay 1", f'AirPlay 1 bridge → {d["address"]}', d["name"], "", "",
                    d.get("model", ""), "", ap1=d)
@@ -1882,7 +1953,11 @@ def render(st: dict) -> str:
                   f'turning the sink off turns AirPlay off. A new player name also renames the sink (spaces become _) and keeps its zone settings; Music Assistant sees it as a new player.</p>'
                   f'<div style="display:flex;gap:10px"><button class="btn sec" id="discard" disabled>Discard changes</button>'
                   f'<button class="btn pri" id="apply" disabled>Apply</button></div></div>'
-                  f'<pre id="result" hidden></pre>') if prows else \
+                  f'<pre id="result" hidden></pre>'
+                  + (f'<p class="sub" style="font-size:12px">Removed AirPlay 1 bridges: '
+                     + ", ".join(f'{e(d["name"])} <button class="btn sec sm aunhide" type="button" '
+                                 f'data-key="{e(d["key"])}">List again</button>' for d in ap1_hidden)
+                     + '</p>' if ap1_hidden else "")) if prows else \
                  '<p class="sub" style="margin-top:14px">No zones or sinks yet.</p><pre id="result" hidden></pre>'
 
     creatable = [c for c in st["cards"] if c["free"] or c["free_channels"]]
@@ -1985,6 +2060,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
                         "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
+                        "/api/combine/unload", "/api/ap1/hide",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
                         "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled",
                         "/api/players", "/api/card/rate"):
@@ -2028,6 +2104,10 @@ class Handler(BaseHTTPRequestHandler):
                 lines = remove_combine(body.get("index"))
             elif path == "/api/combine/adopt":
                 lines = adopt_combine(str(body.get("name", "")))
+            elif path == "/api/combine/unload":
+                lines = unload_combine(str(body.get("name", "")))
+            elif path == "/api/ap1/hide":
+                lines = hide_ap1(str(body.get("key", "")), bool(body.get("hidden")))
             elif path == "/api/profile":
                 lines = set_profile(str(body.get("card", "")), str(body.get("profile", "")))
             elif path == "/api/zone":
