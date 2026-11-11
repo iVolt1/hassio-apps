@@ -337,6 +337,7 @@ class Bridge:
         self.min_lead = a.min_lead
         self.skip = 0                      # frames still to skip (a backwards jump)
         self.waiting_since, self.warned, self.short_lead = None, False, 0.0
+        self.best_ahead = None             # most lead any block has had while waiting
         self.stats = {"added": 0, "dropped": 0, "gaps": 0, "gap_ms": 0.0,
                       "resyncs": 0, "err": 0.0, "lead": 0.0}
         self.peak = 0                      # loudest sample since the last report
@@ -414,17 +415,18 @@ class Bridge:
                 break
             if p is not None:
                 self.short_lead = mono_to_unix_ms(p) - now
+                self.best_ahead = max(self.best_ahead or self.short_lead, self.short_lead)
             self.queue.popleft()
         if not self.queue:
             # Say so if this goes on (rather than waiting in silence).
             if not self.waiting_since:
                 self.waiting_since = time.time()
-            elif time.time() - self.waiting_since > 5 and not self.warned:
+            elif (time.time() - self.waiting_since > 5 and not self.warned
+                  and now > self.sender.connected_at * 1000 + self.a.warmup):
                 self.warned = True
-                say(f"waiting to start: blocks arrive {self.short_lead:.0f} ms ahead, a start "
-                    f"needs {not_before - now:.0f} ms (raise --buffer, or lower --offset/--raop-lead)")
+                self.fit_lead(now, not_before, early)
             return
-        self.waiting_since, self.warned = None, False
+        self.waiting_since, self.warned, self.best_ahead = None, False, None
         first_ns = self.queue[0][0]
         self.start_ms = mono_to_unix_ms(first_ns)
         self.fed = 0
@@ -467,6 +469,29 @@ class Bridge:
             say("idle: closing the AirPlay 1 connection")
             self.sender.stop()
             self.sender, self.idle_since = None, None
+
+    def fit_lead(self, now, not_before, early):
+        """Blocks never arrive early enough for a start: the AirPlay 2 sender
+        gives only so much lead (about 1.75 s from Music Assistant or an
+        iPhone), and a bigger buffer can't add to it. Lower the AirPlay 1
+        lead to what fits, for as long as this bridge runs, and reconnect."""
+        ahead = self.best_ahead or self.short_lead
+        raop = getattr(self.a, "raop_lead", 0)
+        new = int(ahead - early - 100 - 300) // 50 * 50     # 100 ms margin, start needs lead + 300
+        if raop and 200 <= new < raop:
+            say(f"the sender only gives {ahead:.0f} ms of lead; a start needs {not_before - now:.0f} ms "
+                f"(AirPlay 1 lead {raop} + offset {early} + 300). Lowering the AirPlay 1 lead to "
+                f"{new} ms and reconnecting. Set it to {new} or less to keep it (or lower the offset).")
+            self.a.raop_lead = new
+            self.min_lead = new + 300
+            self.sender.stop()
+            self.sender = None
+            self.queue.clear()
+            self.waiting_since, self.warned, self.best_ahead = None, False, None
+        else:
+            say(f"waiting to start: blocks arrive {ahead:.0f} ms ahead, a start needs "
+                f"{not_before - now:.0f} ms: lower the AirPlay 1 lead or the offset "
+                f"(lead + offset must stay under about {ahead - 400:.0f} ms)")
 
     def play(self, flags, frames, play_ns, audio):
         """Pass a block on, keeping the stream where the play times say it should be."""
