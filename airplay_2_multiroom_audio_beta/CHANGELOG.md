@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.173)
+- **The AirPlay 1 bridge lowers its lead to what the sender allows.** Music Assistant and
+  iPhones send AirPlay 2 audio only about 1.75 s ahead, and a bigger buffer can't add to
+  that, so an AirPlay 1 lead (+ offset) that needs more could never start (the bridge
+  waited, and the device dropped the connection). After 5 s of that the bridge now lowers
+  the AirPlay 1 lead to what fits (with a 100 ms margin), reconnects and plays, and logs
+  the value to set in the panel. If even that can't fit (a large offset), the log says
+  how much lead + offset may be.
 ### Changed (0.172)
 - **A clear message when another add-on holds the zones' MAC.** If `ap2mv` can't be
   brought up because another interface on the network card is already up with the same
