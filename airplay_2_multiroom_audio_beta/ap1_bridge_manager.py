@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cast_bridge_manager import (  # noqa: E402
     PORT_MAP_FILE, get_or_assign_port, load_name_port_map, lock_port_map,
     safe_name, save_name_port_map)
+from ap1_test import best_v4, local_nets  # noqa: E402
 
 AP1_DIR = Path(os.environ.get("AP1_DIR", "/config/ap1-bridge"))
 DISCOVERED_FILE = AP1_DIR / "discovered.json"
@@ -98,6 +99,7 @@ class Discovery:
         self.pending = {"_raop._tcp.local.": set(), "_airplay._tcp.local.": set()}
         self.raop = {}        # service name -> (address, port, txt)
         self.airplay = {}     # service name -> set of addresses
+        self.nets, self.nets_at = None, 0.0   # our networks, to pick a device's LAN address
         outer = self
 
         class L:
@@ -130,8 +132,10 @@ class Discovery:
             addrs = [a for a in info.parsed_addresses() if ":" not in a]
             if t.startswith("_raop"):
                 if addrs:
+                    if self.nets is None or time.time() - self.nets_at > 300:
+                        self.nets, self.nets_at = local_nets(), time.time()
                     txt = {k.decode(): (v.decode() if v else "") for k, v in info.properties.items()}
-                    self.raop[n] = (addrs[0], info.port, txt)
+                    self.raop[n] = (best_v4(addrs, self.nets), info.port, txt)
             else:
                 self.airplay[n] = set(addrs)
 
