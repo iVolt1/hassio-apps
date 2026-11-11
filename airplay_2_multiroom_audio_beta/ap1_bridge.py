@@ -84,7 +84,7 @@ def mono_to_unix_ms(play_ns: int) -> float:
 class Sender:
     """One cliairplay --protocol raop session (connect .. STOP)."""
 
-    def __init__(self, ip, port, txt, verbose, from_host=False, raop_lead=0):
+    def __init__(self, ip, port, txt, verbose, from_host=False, raop_lead=0, encrypt=True):
         self.events = collections.defaultdict(threading.Event)
         self.started = {}
         self.verbose = verbose
@@ -97,6 +97,11 @@ class Sender:
         for k in ("et", "md", "am", "pk", "pw", "cn"):
             if txt.get(k):
                 cmd += [f"--{k}", txt[k]]
+        # Encrypt the audio (RSA/AES) when the device offers it, as Music
+        # Assistant does by default: some AirPlay 1 receivers accept an
+        # unencrypted session but play nothing.
+        if encrypt and "1" in str(txt.get("et", "")).split(","):
+            cmd += ["--encrypt"]
         cmd += ["--cmdpipe", self.pipe, ip]
         if from_host:
             # Send from the host's address instead of the zones' own: run
@@ -370,11 +375,15 @@ class Bridge:
             self.sender.stop()               # tidy up the old one
             self.sender = None
         if self.sender is None:
-            say("audio arriving: connecting to the AirPlay 1 device")
+            enc = (not getattr(self.a, "no_encrypt", False)
+                   and "1" in str(self.txt.get("et", "")).split(","))
+            say("audio arriving: connecting to the AirPlay 1 device"
+                + (" (encrypted)" if enc else " (unencrypted)"))
             try:
                 self.sender = Sender(self.a.ip, self.raop_port, self.txt, self.a.verbose,
                                      getattr(self.a, "send_from_host", False),
-                                     getattr(self.a, "raop_lead", 0))
+                                     getattr(self.a, "raop_lead", 0),
+                                     not getattr(self.a, "no_encrypt", False))
             except RuntimeError as e:
                 say(f"  {e}; dropping this session's audio")
                 self.queue.clear()
@@ -556,6 +565,8 @@ def main() -> int:
     ap.add_argument("--raop-port", type=int)
     ap.add_argument("--min-lead", type=int, default=300)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--no-encrypt", action="store_true",
+                    help="send unencrypted audio even when the device offers encryption (et=1)")
     ap.add_argument("--send-from-host", action="store_true",
                     help="send the AirPlay 1 stream from the host's IP, not the zones' own")
     ap.add_argument("--buffer", type=float, default=1.0,

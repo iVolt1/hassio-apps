@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.168)
+- **AirPlay 1 devices that stay silent.** The AirPlay 1 bridge now encrypts the audio when
+  the device offers encryption (`et` includes 1), as Music Assistant does by default.
+  Some AirPlay 1 receivers accept an unencrypted session and then play nothing (seen with
+  a StellarLabs receiver). The bridge log's "audio arriving" line now says
+  `(encrypted)` or `(unencrypted)`; `ap1_bridge.py --no-encrypt` turns it off.
+
 ### Changed (0.167)
 - **Sample rate and format moved to the sound card.** They are card settings, so they now
   sit in each card's box under *Sound cards*, below its Profile: **Sample rate and format
