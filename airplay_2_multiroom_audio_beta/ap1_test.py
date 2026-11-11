@@ -32,6 +32,7 @@ Options:
 import argparse
 import math
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -51,6 +52,38 @@ def ts() -> str:
 
 def say(msg: str) -> None:
     print(f"{ts()}  {msg}", flush=True)
+
+
+def local_nets():
+    """IPv4 networks this machine (or namespace) has an address on."""
+    import ipaddress
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "addr"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    nets = []
+    for m in re.findall(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", out):
+        net = ipaddress.ip_interface(m).network
+        if not net.is_loopback:
+            nets.append(net)
+    return nets
+
+
+def best_v4(addrs, nets=None):
+    """The IPv4 address to reach a device at. Some devices also advertise
+    an address of their own hotspot or a second network (e.g. 192.168.168.1):
+    prefer one on a network we're on, else the first in a stable order."""
+    import ipaddress
+    v4 = sorted({a for a in addrs if ":" not in a},
+                key=lambda a: tuple(int(x) for x in a.split(".")))
+    if not v4:
+        return None
+    nets = local_nets() if nets is None else nets
+    for a in v4:
+        if any(ipaddress.ip_address(a) in n for n in nets):
+            return a
+    return v4[0]
 
 
 def raop_service(ip: str, wait: float = 8.0):
@@ -93,8 +126,9 @@ def raop_service(ip: str, wait: float = 8.0):
                     info = None
                 if info and matches(name, info):
                     txt = {k.decode(): (v.decode() if v else "") for k, v in info.properties.items()}
-                    v4 = [x for x in info.parsed_addresses() if ":" not in x]
-                    txt["_addr"] = (v4 or info.parsed_addresses())[0]
+                    addrs = info.parsed_addresses()
+                    # An address was given: keep it; a name: pick the LAN one.
+                    txt["_addr"] = ip if ip in addrs else (best_v4(addrs) or addrs[0])
                     found["svc"] = (info.port, txt, name)
                     break
             time.sleep(0.1)

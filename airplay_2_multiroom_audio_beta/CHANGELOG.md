@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.174)
+
+- AirPlay 1 bridge: a device that also advertises an address on another
+  network (its own hotspot, e.g. 192.168.168.1) is now reached at its
+  address on your LAN. Before, the bridge could pick the other address and
+  fail with "RAOP connect failed", and the manager could restart the bridge
+  whenever mDNS listed the addresses in a different order.
+
 ### Changed (0.173)
 - **The AirPlay 1 bridge lowers its lead to what the sender allows.** Music Assistant and
   iPhones send AirPlay 2 audio only about 1.75 s ahead, and a bigger buffer can't add to
