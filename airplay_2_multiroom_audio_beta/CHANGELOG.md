@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.170)
+- **The zones' own network (`ap2_ip`) no longer falls back to the host IP after a quick
+  restart.** The previous run's `ap2mv` interface can outlive its namespace for a few
+  seconds while the kernel tears it down, and creating the new one with the same
+  `ap2_mac` then fails with "Address in use". The add-on fell back to host network mode,
+  where Music Assistant can only reach the zones with AirPlay 1. Setup now retries for up
+  to 30 s, and the log names the step that failed (`generate_airplay2_services.log`).
+
 ### Fixed (0.169)
 - **Audio pipes moved off the disk.** The Cast zones' audio FIFOs (were in
   `/media/music/castbridge`) and the AirPlay 1 bridge's FIFOs (audio, metadata,

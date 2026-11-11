@@ -103,18 +103,31 @@ if [ -n "$AP2_IP" ]; then
         [ -n "$AP2_PARENT" ] || { echo "ap2: no parent interface detected"; return 1; }
         ip netns list >/dev/null 2>&1 || { echo "ap2: 'ip' has no netns support (busybox ip? install iproute2)"; return 1; }
         ap2_cleanup
-        ip netns add "$AP2_NS" || return 1
+        ip netns add "$AP2_NS" || { echo "ap2: 'ip netns add $AP2_NS' failed"; return 1; }
+        # The previous run's ap2mv (same MAC) can outlive its namespace for a
+        # few seconds after a restart, while the kernel tears that namespace
+        # down; until then the MAC is "in use" (EADDRINUSE). Wait for it.
+        tries=0
         # shellcheck disable=SC2086
-        ip link add ap2mv link "$AP2_PARENT" ${AP2_MAC:+address $AP2_MAC} type macvlan mode bridge || return 1
+        until ip link add ap2mv link "$AP2_PARENT" ${AP2_MAC:+address $AP2_MAC} type macvlan mode bridge; do
+            tries=$((tries + 1))
+            if [ "$tries" -ge 15 ]; then
+                echo "ap2: creating macvlan ap2mv on ${AP2_PARENT}${AP2_MAC:+ with MAC $AP2_MAC} failed 15 times"
+                return 1
+            fi
+            echo "ap2: macvlan ap2mv not created yet (attempt ${tries}); retrying in 2 s"
+            sleep 2
+        done
+        [ "$tries" -gt 0 ] && echo "ap2: macvlan ap2mv created after $((tries * 2)) s"
         ip link set ap2mv netns "$AP2_NS" || return 1
         ip -n "$AP2_NS" link set lo up || return 1
         ip -n "$AP2_NS" link set ap2mv up || return 1
-        ip -n "$AP2_NS" addr add "$AP2_IP" dev ap2mv || return 1
+        ip -n "$AP2_NS" addr add "$AP2_IP" dev ap2mv || { echo "ap2: adding $AP2_IP to ap2mv failed"; return 1; }
         if [ -n "$AP2_GW" ]; then
             ip -n "$AP2_NS" route add default via "$AP2_GW" || return 1
         fi
         if [ -n "$AP2_SHIM_IP" ]; then
-            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || return 1
+            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || { echo "ap2: creating shim macvlan ap2shim failed"; return 1; }
             ip addr add "${AP2_SHIM_IP%/*}/32" dev ap2shim || return 1
             ip link set ap2shim up || return 1
             # Send to the zones FROM the host's real IP (not the shim's), so
