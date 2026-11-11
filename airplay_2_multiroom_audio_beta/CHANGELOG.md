@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.172)
+- **A clear message when another add-on holds the zones' MAC.** If `ap2mv` can't be
+  brought up because another interface on the network card is already up with the same
+  MAC ("Address in use"), `generate_airplay2_services.log` now says so and suggests the
+  usual cause: a second copy of this add-on (e.g. the non-beta one, started at boot)
+  running with the same `ap2_mac` / `ap2_ip`. The other add-on's interface lives in its
+  own network namespace, so it doesn't show in the host's interface list.
+
 ### Fixed (0.171)
 - **The zones' own network setup retries as a whole.** After a restart the setup failed
   twice in a row with "Address in use", although the same commands worked by hand a
