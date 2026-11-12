@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.176)
+
+- AirPlay 2 zones: shairport-sync updated from 5.6.2 to 5.6.3. The SSRC 0
+  patch (for Music Assistant, mikebrady/shairport-sync#2319) still applies
+  unchanged. The AirPlay 1 bridge's own shairport-sync build is unchanged.
+
 ### Added (0.175)
 
 - Panel: AirPlay 1 bridges have a "Remove bridge" button under More. It

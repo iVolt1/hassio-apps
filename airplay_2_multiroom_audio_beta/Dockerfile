@@ -38,11 +38,11 @@ RUN apk add --no-cache \
     avahi-dev libplist-dev libsodium-dev libgcrypt-dev \
     util-linux-dev ffmpeg-dev xxd libplist-util ca-certificates mosquitto-dev
 WORKDIR /tmp
-# Pinned to the 5.6.2 release, plus a local patch: for senders that send SSRC 0 on
+# Pinned to the 5.6.3 release, plus a local patch: for senders that send SSRC 0 on
 # buffered AirPlay 2 packets (Music Assistant's cliairplay), take the audio format from
 # the stream SETUP's audioFormat instead. See mikebrady/shairport-sync#2319.
 COPY sps-ssrc0-fallback.patch /tmp/sps-ssrc0-fallback.patch
-RUN git clone --depth 1 --branch 5.6.2 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
+RUN git clone --depth 1 --branch 5.6.3 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
     cd shairport-sync-ap2 && \
     git apply /tmp/sps-ssrc0-fallback.patch && \
     autoreconf -fi && \
