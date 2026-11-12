@@ -5,6 +5,11 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.177)
+
+- Panel: the sound card sample rate choice now has every 44.1 and 48 kHz
+  multiple up to 384 kHz (44.1, 48, 88.2, 96, 176.4, 192, 352.8 and 384 kHz).
+
 ### Changed (0.176)
 
 - AirPlay 2 zones: shairport-sync updated from 5.6.2 to 5.6.3. The SSRC 0
