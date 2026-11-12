@@ -682,7 +682,7 @@ def set_profile(card: str, profile: str) -> list:
         mark_busy()   # the zone manager's hotplug check waits a little longer
 
 
-CARD_RATES = ("44100", "48000", "96000", "192000")
+CARD_RATES = ("44100", "48000", "88200", "96000", "176400", "192000", "352800", "384000")
 CARD_FORMATS = {"s16le": "16 bit", "s24le": "24 bit", "s32le": "32 bit"}
 
 
