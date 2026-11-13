@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.178)
+
+- AirPlay 1 bridge: cliairplay updated from 0.5.9 to 0.5.10, which includes
+  re-anchoring a playing RAOP stream on a corrective START
+  (music-assistant/airplay-cli#98). The RAOP lead patch applies unchanged.
+
 ### Changed (0.177)
 
 - Panel: the sound card sample rate choice now has every 44.1 and 48 kHz
