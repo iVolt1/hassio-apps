@@ -16,7 +16,7 @@ RUN git clone https://github.com/mikebrady/nqptp.git && \
 # Only libraop's own submodules are needed (its prebuilt targets/), not the
 # OpenSSL/BoringSSL sources nested below them.
 FROM debian:bookworm-slim AS cliairplay-builder
-ARG CLIAIRPLAY_REF=v0.5.12
+ARG CLIAIRPLAY_REF=v0.5.13
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp
