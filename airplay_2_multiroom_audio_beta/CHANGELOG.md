@@ -5,6 +5,16 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.179)
+
+- AirPlay 2 zones: the shairport-sync patch for Music Assistant also handles
+  the cliairplay change in music-assistant/airplay-cli#110, which tags
+  buffered audio with its format in the SSRC instead of 0. ALAC 44.1k/16
+  (0x12000000) and 44.1k/24 (0x13000000) are decoded (shairport-sync 5.6.3
+  only knows Apple's ALAC 48k/24), and cliairplay's 16-bit sequence numbers
+  are still recognised, so flushes complete. Today's cliairplay (SSRC 0)
+  works as before.
+
 ### Changed (0.178)
 
 - AirPlay 1 bridge: cliairplay updated from 0.5.9 to 0.5.10, which includes
