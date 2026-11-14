@@ -42,9 +42,11 @@ WORKDIR /tmp
 # buffered AirPlay 2 packets (Music Assistant's cliairplay), take the audio format from
 # the stream SETUP's audioFormat instead. See mikebrady/shairport-sync#2319.
 COPY sps-ssrc0-fallback.patch /tmp/sps-ssrc0-fallback.patch
-RUN git clone --depth 1 --branch 5.6.3 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
+RUN git clone https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
+#RUN git clone --depth 1 --branch 5.6.3 https://github.com/mikebrady/shairport-sync.git shairport-sync-ap2 && \
     cd shairport-sync-ap2 && \
-    git apply /tmp/sps-ssrc0-fallback.patch && \
+    git switch development && \
+    #git apply /tmp/sps-ssrc0-fallback.patch && \
     autoreconf -fi && \
     ./configure \
         --prefix=/usr \
