@@ -25,7 +25,7 @@ COPY cliairplay-raop-lead.patch /tmp/cliairplay-raop-lead.patch
 RUN git clone https://github.com/music-assistant/airplay-cli.git && \
 #RUN git clone --depth 1 --branch ${CLIAIRPLAY_REF} https://github.com/music-assistant/airplay-cli.git && \
     cd airplay-cli && \
-    git switch shairport-sync-wait && \
+    git switch shairport-start-wait && \
     git apply /tmp/cliairplay-raop-lead.patch && \
     git submodule update --init --depth 1 libraop && \
     git -C libraop submodule update --init --depth 1 && \
