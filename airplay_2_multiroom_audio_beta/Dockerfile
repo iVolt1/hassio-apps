@@ -22,8 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /tmp
 # Patch: CLIAIRPLAY_RAOP_LEAD_MS sets the RAOP lead (fixed 2000 ms upstream).
 COPY cliairplay-raop-lead.patch /tmp/cliairplay-raop-lead.patch
-RUN git clone --depth 1 --branch ${CLIAIRPLAY_REF} https://github.com/music-assistant/airplay-cli.git && \
+RUN git clone https://github.com/music-assistant/airplay-cli.git && \
+#RUN git clone --depth 1 --branch ${CLIAIRPLAY_REF} https://github.com/music-assistant/airplay-cli.git && \
     cd airplay-cli && \
+    git switch shairport-sync-wait && \
     git apply /tmp/cliairplay-raop-lead.patch && \
     git submodule update --init --depth 1 libraop && \
     git -C libraop submodule update --init --depth 1 && \
