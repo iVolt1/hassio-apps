@@ -54,6 +54,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # run with -I
+import panel_settings  # noqa: E402
+
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CUSTOM_PA = Path(os.environ.get("RS_CUSTOM_PA", "/config/custom.pa"))
 STATE_FILE = Path(os.environ.get("RS_STATE_FILE",
@@ -95,14 +98,18 @@ def set_zone_on(options: dict, key: str, on: bool, old_key: str = None) -> bool:
 
 
 def save_options(options: dict) -> tuple:
-    """(ok, message): saves the options through the Supervisor, then
-    /data/options.json (the Supervisor only rewrites it at start)."""
+    """(ok, message): saves the panel's settings (panel_settings.py) and
+    /data/options.json; the Configuration tab's options go through the
+    Supervisor first, if they changed."""
+    if not panel_settings.supervisor_changed(options, OPTIONS_FILE):
+        panel_settings.save(options, OPTIONS_FILE)
+        return True, "options saved"
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if not token:
         return False, "no SUPERVISOR_TOKEN"
     req = urllib.request.Request(
         "http://supervisor/addons/self/options",
-        data=json.dumps({"options": options}).encode(), method="POST",
+        data=json.dumps({"options": panel_settings.supervisor_part(options)}).encode(), method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -113,9 +120,7 @@ def save_options(options: dict) -> tuple:
         return False, f"cannot reach the Supervisor: {e}"
     if body.get("result") != "ok":
         return False, f"Supervisor refused the options: {body.get('message') or body}"
-    tmp = OPTIONS_FILE.with_name(OPTIONS_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(options))
-    os.replace(tmp, OPTIONS_FILE)
+    panel_settings.save(options, OPTIONS_FILE)
     return True, "options saved"
 
 
@@ -938,6 +943,10 @@ def main() -> int:
     fcntl.flock(lock, fcntl.LOCK_EX)
     dry_run = "--dry-run" in sys.argv[1:]
     load = "--load" in sys.argv[1:]
+    if not dry_run and not panel_settings.merge_into_options(OPTIONS_FILE):
+        # Without the panel's settings every sink would look removed.
+        log("panel settings not available; leaving sinks and zones as they are")
+        return 1
     if "--first-run" in sys.argv[1:] and not dry_run:
         first_run()
     if load and not dry_run:

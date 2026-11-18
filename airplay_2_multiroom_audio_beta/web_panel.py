@@ -498,15 +498,24 @@ class ApplyError(Exception):
 
 
 def save_options(options: dict) -> None:
-    """Saves the add-on's whole options through the Supervisor (validated
-    against the schema there), then writes /data/options.json, which the
-    Supervisor otherwise only rewrites when the add-on starts."""
+    """Saves the options: the panel's settings to /config/panel-settings.json
+    (panel_settings.py) and /data/options.json; the Configuration tab's
+    options go through the Supervisor first (validated against the schema
+    there), only if they changed."""
+    if not rs.panel_settings.SETTINGS_FILE.exists():
+        raise ApplyError("the panel's settings weren't loaded at start (see the add-on log); "
+                         "restart the add-on before changing anything")
+    if not rs.panel_settings.supervisor_changed(options, OPTIONS_FILE):
+        # Only the panel's own settings changed (the usual case).
+        rs.panel_settings.save(options, OPTIONS_FILE)
+        return
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if not token:
         raise ApplyError("no SUPERVISOR_TOKEN (hassio_api missing from config.yaml?)")
     req = urllib.request.Request(
         f"{SUPERVISOR_URL}/addons/self/options",
-        data=json.dumps({"options": options}).encode(), method="POST",
+        data=json.dumps({"options": rs.panel_settings.supervisor_part(options)}).encode(),
+        method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -521,9 +530,7 @@ def save_options(options: dict) -> None:
         raise ApplyError(f"cannot reach the Supervisor: {e}")
     if body.get("result") != "ok":
         raise ApplyError(f"Supervisor refused the options: {body.get('message') or body}")
-    tmp = OPTIONS_FILE.with_name(OPTIONS_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(options))
-    os.replace(tmp, OPTIONS_FILE)
+    rs.panel_settings.save(options, OPTIONS_FILE)
 
 
 def change_and_apply(change, edit_options=None) -> list:
