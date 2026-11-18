@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.188)
+
+- AirPlay 1 bridge: no longer crashes with "BrokenPipeError" when the device
+  drops the connection before playback starts (for example because another
+  sender took it over); it starts again with the next block instead of
+  restarting the whole bridge.
+- AirPlay 1 bridge: when the device ends the session, the log explains the
+  usual cause: Music Assistant also playing to the same device directly.
+
 ### Fixed (0.179)
 
 - AirPlay 2 zones: the shairport-sync patch for Music Assistant also handles
