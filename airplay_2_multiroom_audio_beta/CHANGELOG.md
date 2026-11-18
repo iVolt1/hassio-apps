@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.190)
+
+- Line in to AirPlay, step 1 (run by hand): linein_airplay.py captures
+  PulseAudio's default input and sends it over AirPlay 1 (cliairplay) to a
+  named AirPlay receiver, meant for one of Music Assistant's AirPlay
+  Receiver plugin receivers. It connects when the input has a signal and
+  disconnects after 10 s without one. Not in the web panel yet.
+
 ### Changed (0.189)
 
 - The settings the web panel manages are no longer add-on options, so they

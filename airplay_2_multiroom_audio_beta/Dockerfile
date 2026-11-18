@@ -131,6 +131,7 @@ COPY web_panel.py /usr/sbin/web_panel.py
 COPY bt_reset.py /usr/sbin/bt_reset.py
 COPY ap1_test.py /usr/sbin/ap1_test.py
 COPY ap1_bridge.py /usr/sbin/ap1_bridge.py
+COPY linein_airplay.py /usr/sbin/linein_airplay.py
 COPY ap1_bridge_manager.py /usr/sbin/ap1_bridge_manager.py
 RUN chmod +x /usr/sbin/generate_airplay2_services.sh \
              /usr/sbin/run_stage2_hooks.sh
