@@ -143,6 +143,13 @@ class Sender:
                     or (self.verbose and any(w in line.lower()
                                              for w in ("retr", "resend", "missing", "lost", "late")))):
                 say(f"  cliairplay: {line}")
+            if "[STATUS] receiver_closed" in line and not Sender.takeover_hint:
+                Sender.takeover_hint = True
+                say("  the device ended the session: usually another sender took it over. "
+                    "An AirPlay 1 device takes one sender at a time, so if Music Assistant also "
+                    "plays to it directly (not through this bridge), the two keep taking it from "
+                    "each other. Play to the bridge's zone instead, or disable the device's own "
+                    "player in Music Assistant.")
             for key in ("connected", "audio", "started", "flushed"):
                 if f"[STATUS] {key}" in line:
                     if key == "started":
@@ -154,12 +161,20 @@ class Sender:
                             self.started = {}
                     self.events[key].set()
 
+    takeover_hint = False   # said once per bridge run
+
     def alive(self):
         return self.proc.poll() is None
 
     def send(self, *lines):
-        self.cmd.write("".join(l + "\n" for l in lines))
-        self.cmd.flush()
+        # cliairplay may already have exited (e.g. the device was taken over by
+        # another sender): don't crash the bridge; the next audio write notices
+        # it's gone and starts a new connection.
+        try:
+            self.cmd.write("".join(l + "\n" for l in lines))
+            self.cmd.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
 
     def wait(self, key, timeout):
         ok = self.events[key].wait(timeout)

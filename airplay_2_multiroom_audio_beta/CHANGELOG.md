@@ -5,6 +5,26 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.189)
+
+- The settings the web panel manages are no longer add-on options, so they
+  no longer appear in the Configuration tab: remap sinks, combine sinks,
+  card profiles, card options and which zones are on. They are kept in
+  /config/panel-settings.json (/addon_configs/<slug>/panel-settings.json on
+  the host, included in backups). The first start of 0.189 moves them there
+  from the options; nothing changes in the panel. The Configuration tab
+  keeps the log level, the Bluetooth reset and the ap2_* network settings.
+- Includes 0.188 (AirPlay 1 bridge fixes).
+
+### Fixed (0.188)
+
+- AirPlay 1 bridge: no longer crashes with "BrokenPipeError" when the device
+  drops the connection before playback starts (for example because another
+  sender took it over); it starts again with the next block instead of
+  restarting the whole bridge.
+- AirPlay 1 bridge: when the device ends the session, the log explains the
+  usual cause: Music Assistant also playing to the same device directly.
+
 ### Fixed (0.179)
 
 - AirPlay 2 zones: the shairport-sync patch for Music Assistant also handles
