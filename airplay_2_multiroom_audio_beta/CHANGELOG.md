@@ -5,6 +5,43 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.199)
+
+- Panel: tabs at the top (Zones, Sound cards, Combine sinks, Line in,
+  Bluetooth) instead of one long page; it opens on Zones. The tab shown is
+  kept in the address (#cards, ...), so the reload after Apply comes back
+  to it, and a tab can be bookmarked.
+
+### Added (0.198)
+
+- Panel: "Download logs" (top right) saves one zip with every log of the
+  add-on (zones, zone manager, Cast and AirPlay 1 bridges, line in, panel,
+  startup), the panel's settings, the zones' overrides and a PulseAudio
+  snapshot (cards, sinks, streams, sources, modules) in diagnostics.txt.
+
+### Added (0.197)
+
+- Zones that get stuck are restarted automatically. A zone in a session
+  (playing, not paused) that stops logging its statistics for 30 s is
+  receiving audio but not playing it; the zone manager restarts that zone's
+  shairport-sync (at most once every 2 minutes) and notes it in the zone's
+  log and its own. Seen after a skip or seek on Kitchen and Dining Room.
+  Needs the default log level (vv) or higher: below that, pauses aren't
+  logged and the check stays off.
+
+### Added (0.196)
+
+- Panel: "Restart zone" under a zone's More restarts just that zone's
+  shairport-sync (within 5 s); the other zones keep playing. For a zone that
+  is stuck, where before only an add-on restart helped.
+- Zone logs are cut back to their last 2 MB once they pass 20 MB, with a
+  note at the top (a stalled zone once logged 49 MB of one repeated line).
+
+### Changed (0.196)
+
+- Panel: the Sound cards hint now says what a profile, rate or format change
+  does: the card reloads and its zones pause for a moment.
+
 ### Fixed (0.195)
 
 - Panel: sound cards stay in the same order (by their PCI address, Bluetooth

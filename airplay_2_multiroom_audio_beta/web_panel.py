@@ -41,6 +41,9 @@ set; that restarts only that zone.
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
   POST /api/linein {"enabled", "target", "threshold_db", "hold_s", "gain_db"}:
                     line in settings (linein_airplay.py picks them up within 2 s)
+  GET  /api/logs.zip: every log of the add-on, its panel settings and a
+                    snapshot of PulseAudio, for a bug report
+  POST /api/zone/restart {"key"}: restarts one zone's shairport-sync
   GET  /api/linein/status: the line in service's state and level
   POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
   POST /api/combine/unload {"name"}: unloads an unmanaged combine sink now
@@ -89,6 +92,8 @@ ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").s
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
 AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))
+LOG_ROOT = Path(os.environ.get("WP_LOG_ROOT", "/config"))   # for /api/logs.zip
+RESTART_DIR = Path(os.environ.get("WP_RESTART_DIR", "/tmp/airplay2_zone_restart"))   # sink_zone_manager.py
 LINEIN_DIR = Path(os.environ.get("WP_LINEIN_DIR", "/config/line-in"))   # linein_airplay.py
 LINEIN_DEFAULTS = {"enabled": False, "target": "", "threshold_db": -50.0, "hold_s": 10.0,
                    "gain_db": 0.0}   # ap1_bridge_manager.py
@@ -619,6 +624,56 @@ def mark_busy() -> None:
         PANEL_BUSY_FILE.write_text(str(time.time()))
     except OSError:
         pass
+
+
+def logs_zip() -> bytes:
+    """The add-on's logs, settings and a PulseAudio snapshot, zipped."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    pats = [("shairport-sync/logs", "*.log"), ("cast-bridge/logs", "*.log"),
+            ("ap1-bridge", "*.log"), ("ap1-bridge", "*.json"),
+            ("line-in", "*.log"), ("line-in", "*.json"),
+            ("shairport-sync/config", "*.custom"), ("shairport-sync/config", "port_map.txt"),
+            (".", "panel-settings.json"), (".", "*_state.json")]
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        seen = set()
+        for d, pat in pats:
+            for f in sorted((LOG_ROOT / d).glob(pat)):
+                if f.is_file() and f not in seen:
+                    seen.add(f)
+                    try:
+                        z.write(f, str(f.relative_to(LOG_ROOT)))
+                    except OSError as e:
+                        log.warning("logs.zip: %s: %s", f, e)
+        diag = [f"# {time.strftime('%Y-%m-%d %H:%M:%S %Z')}"]
+        try:
+            opts = json.loads(OPTIONS_FILE.read_text())
+            diag.append("# options (Configuration tab)\n" + json.dumps(
+                {k: v for k, v in opts.items() if k not in rs.panel_settings.PANEL_KEYS}, indent=1))
+        except (OSError, ValueError):
+            pass
+        for args in (("list", "cards", "short"), ("list", "sinks", "short"),
+                     ("list", "sink-inputs", "short"), ("list", "sources", "short"),
+                     ("list", "modules", "short"), ("info",)):
+            ok, out = rs.pactl(*args)
+            diag.append(f"# pactl {' '.join(args)}\n{out}")
+        diag.append("# zones\n" + "\n".join(
+            f"{z['name']}\t{z['kind']}\tport {z['port']}\tpid {z['pid']}\t"
+            f"{'playing' if z['playing'] else 'idle'}\t{z['target']}" for z in zones()))
+        z.writestr("diagnostics.txt", "\n\n".join(diag) + "\n")
+    return buf.getvalue()
+
+
+def restart_zone(key: str) -> list:
+    """Asks the zone manager to restart one zone's shairport-sync (it checks
+    every 5 s); its other zones keep playing."""
+    z = next((z for z in zones() if z["key"] == key and z["kind"] != "cast"), None)
+    if not z:
+        raise ApplyError(f"{key}: no such zone running; reload the page")
+    RESTART_DIR.mkdir(parents=True, exist_ok=True)
+    (RESTART_DIR / f"{time.time_ns()}").write_text(key)
+    return [f"{z['name']}: restarting (within 5 s; the other zones keep playing)"]
 
 
 def stream_snapshot() -> dict:
@@ -1565,7 +1620,11 @@ def apply_players(rows: list) -> list:
 # -- page -----------------------------------------------------------------
 CSS = """
 body{margin:0;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
-header{padding:20px 32px;border-bottom:1px solid #2a2f38}
+header{padding:20px 32px 8px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+nav.tabs{display:flex;flex-wrap:wrap;gap:4px;padding:0 24px;border-bottom:1px solid #2a2f38}
+nav.tabs button{background:none;border:0;border-bottom:2px solid transparent;color:#9aa3ae;padding:0 14px;min-height:44px;font:600 14px system-ui,sans-serif;cursor:pointer}
+nav.tabs button:hover{color:#e6e8eb}
+nav.tabs button.on{color:#e6e8eb;border-bottom-color:#4a8fe7}
 header b{font-size:18px;font-weight:600}
 main{max-width:1280px;margin:0 auto;padding:28px 32px;display:flex;flex-direction:column;gap:28px}
 h1,h2{margin:0;font-weight:600}h1{font-size:22px}h2{font-size:20px}
@@ -1777,6 +1836,8 @@ document.querySelectorAll('button.ahide').forEach(b => b.addEventListener('click
   b.dataset.armed = '1'; b.textContent = 'Click again to remove';
   setTimeout(() => { delete b.dataset.armed; b.textContent = 'Remove bridge'; }, 4000);
 }));
+document.querySelectorAll('button.zrestart').forEach(b => b.addEventListener('click', () =>
+  post('api/zone/restart', {key: b.dataset.key}, 'result', 6000)));
 document.querySelectorAll('button.aunhide').forEach(b => b.addEventListener('click', () =>
   post('api/ap1/hide', {key: b.dataset.key, hidden: false})));
 document.querySelectorAll('button.kadopt').forEach(b => b.addEventListener('click', () =>
@@ -1826,6 +1887,20 @@ document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click'
     .catch(() => { const r = document.createRange(); r.selectNode(b.previousElementSibling);
                    getSelection().removeAllRanges(); getSelection().addRange(r); });
 }));
+
+// Tabs: the one shown is kept in the address (#cards ...), so the reload
+// after Apply comes back to it.
+function showTab(t) {
+  const secs = [...document.querySelectorAll('section[data-tab]')];
+  if (!secs.some(x => x.dataset.tab === t)) t = 'zones';
+  secs.forEach(x => { x.hidden = x.dataset.tab !== t; });
+  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+}
+document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => {
+  history.replaceState(null, '', '#' + b.dataset.tab);
+  showTab(b.dataset.tab);
+}));
+showTab(location.hash.slice(1));
 """
 
 
@@ -2019,9 +2094,12 @@ def render(st: dict) -> str:
                 f'Log: {e((ap1["status"] or {}).get("log", "-"))}. '
                 f'Remove bridge: switches it off and takes it off this list (it can be listed again below the table).</p></td></tr>')
         elif not cast:
+            restart = (f'<button class="btn sec sm zrestart" type="button" data-key="{e(key)}" '
+                       f'title="Restart this zone\'s shairport-sync; the other zones keep playing">'
+                       f'Restart zone</button>' if z else "")
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
-                f'<div style="display:flex;gap:0;align-items:flex-end">{more_actions}</div>'
+                f'<div style="display:flex;gap:0;align-items:flex-end">{restart}{more_actions}</div>'
                 f'<div style="flex:0 0 160px"><label>Max volume (dB)</label>'
                 f'<input class="pv" data-f="volume_max_db" inputmode="decimal" value="{e(ov.get("volume_max_db", ""))}" placeholder="0"></div></div>'
                 f'<p class="sub" style="margin:10px 0 0;font-size:12px">Max volume saves with Apply.</p></td></tr>')
@@ -2143,26 +2221,29 @@ def render(st: dict) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
-<header><b>AirPlay 2 Multiroom Audio</b></header>
+<header><b>AirPlay 2 Multiroom Audio</b><a class="btn sec sm" href="api/logs.zip" download style="text-decoration:none;display:inline-flex;align-items:center" title="Every log of the add-on, its settings and a PulseAudio snapshot, in one zip, for a bug report">Download logs</a></header>
+<nav class="tabs" aria-label="Sections"><button type="button" data-tab="zones">Zones</button><button type="button" data-tab="cards">Sound cards</button><button type="button" data-tab="combine">Combine sinks</button><button type="button" data-tab="linein">Line in</button><button type="button" data-tab="bluetooth">Bluetooth</button></nav>
 <main>
-<section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
-<section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
-<button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
-<section><h2>Line in</h2><p class="sub">Sends the default PulseAudio input to an AirPlay receiver, such as one of Music Assistant's AirPlay Receiver plugin receivers, while there's a signal on it. Receivers are found on the network; the list fills in a few seconds after the add-on starts.</p>
-{linein_html()}</section>
-<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format restarts that card's zones.</p>
+<section data-tab="zones"><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
+<section data-tab="cards"><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format reloads the card: its zones pause for a moment and carry on.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
-<section><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
+<section data-tab="combine"><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
 {combine_html}</section>
+<section data-tab="linein"><h2>Line in</h2><p class="sub">Sends the default PulseAudio input to an AirPlay receiver, such as one of Music Assistant's AirPlay Receiver plugin receivers, while there's a signal on it. Receivers are found on the network; the list fills in a few seconds after the add-on starts.</p>
+{linein_html()}</section>
+<section data-tab="bluetooth"><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
+<button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
 </main><script>{SCRIPT}</script></body></html>"""
 
 
 # -- server ---------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: str, ctype: str):
-        data = body.encode()
+    def _send(self, code: int, body, ctype: str, filename: str = ""):
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -2185,6 +2266,9 @@ class Handler(BaseHTTPRequestHandler):
                            "text/plain; charset=utf-8")
             elif path == "/api/linein/status":
                 self._send(200, json.dumps(linein_status()), "application/json")
+            elif path == "/api/logs.zip":
+                self._send(200, logs_zip(), "application/zip",
+                           f"airplay2-logs-{time.strftime('%Y%m%d-%H%M%S')}.zip")
             elif path == "/api/state":
                 self._send(200, json.dumps(state(), indent=2), "application/json")
             else:
@@ -2201,7 +2285,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
-                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt", "/api/linein",
+                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt", "/api/linein", "/api/zone/restart",
                         "/api/combine/unload", "/api/ap1/hide",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
                         "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled",
@@ -2246,6 +2330,8 @@ class Handler(BaseHTTPRequestHandler):
                 lines = remove_combine(body.get("index"))
             elif path == "/api/linein":
                 lines = set_linein(body)
+            elif path == "/api/zone/restart":
+                lines = restart_zone(str(body.get("key", "")))
             elif path == "/api/combine/adopt":
                 lines = adopt_combine(str(body.get("name", "")))
             elif path == "/api/combine/unload":
