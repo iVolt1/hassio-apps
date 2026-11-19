@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.194)
+
+- Changing a sound card's sample rate, format or profile in the panel no
+  longer leaves that card's zones playing through another card. While the
+  card reloads, PulseAudio moves the zones' streams to the default sink and
+  doesn't move them back when the card returns (e.g. Kitchen playing through
+  Basement Room's speakers). The panel now moves them back and says so.
+
 ### Added (0.193)
 
 - Line in, step 2: a Line in section in the web panel. Switch it on, choose

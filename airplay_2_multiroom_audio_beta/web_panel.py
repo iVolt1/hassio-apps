@@ -618,6 +618,37 @@ def mark_busy() -> None:
         pass
 
 
+def stream_snapshot() -> dict:
+    """{sink input index: sink name} for every playing stream."""
+    ok, sinks = rs.pactl("list", "sinks", "short")
+    ok2, inputs = rs.pactl("list", "sink-inputs", "short")
+    if not (ok and ok2):
+        return {}
+    names = {f[0]: f[1] for f in (l.split("\t") for l in sinks.splitlines()) if len(f) > 1}
+    return {f[0]: names.get(f[1], "") for f in (l.split("\t") for l in inputs.splitlines())
+            if len(f) > 1}
+
+
+def restore_streams(before: dict) -> list:
+    """Moves streams back to the sinks they were on before a card was
+    reloaded or switched. While a card's sinks are gone, PulseAudio moves
+    their streams (a zone's shairport-sync output on a remap sink of that
+    card) to the default sink, and doesn't move them back when the sinks
+    return: the zone would go on playing through another card's speakers."""
+    after = stream_snapshot()
+    ok, sinks = rs.pactl("list", "sinks", "short")
+    present = {l.split("\t")[1] for l in sinks.splitlines() if "\t" in l} if ok else set()
+    lines = []
+    for idx, was in before.items():
+        now = after.get(idx)
+        if now is None or not was or now == was or was not in present:
+            continue
+        ok, out = rs.pactl("move-sink-input", idx, was)
+        lines.append(f"stream #{idx} moved back to {was} (PulseAudio had moved it to {now})"
+                     if ok else f"stream #{idx}: could not move it back to {was}: {out}")
+    return lines
+
+
 def set_profile(card: str, profile: str) -> list:
     """Sets a card's profile now, keeps it in card_profiles, and re-points
     the card's remap_sinks entries to its new output sink where their pair
@@ -634,6 +665,7 @@ def set_profile(card: str, profile: str) -> list:
     # Descriptions before the switch: an entry using its system name gets it
     # from its master's description, and that sink is about to go away.
     pre_descs = {s["name"]: s.get("description", "") for s in list_sinks() if "name" in s}
+    streams = stream_snapshot()
     lines = []
     if old_profile != profile:
         res = subprocess.run(["pactl", "set-card-profile", card, profile],
@@ -688,7 +720,8 @@ def set_profile(card: str, profile: str) -> list:
                            " (kept in the options; switching back restores it)")
         return out or ["no remap sinks on this card"]
     try:
-        return lines + change_and_apply(change, edit_options)
+        out = lines + change_and_apply(change, edit_options)
+        return out + restore_streams(streams)
     except ApplyError as e:
         raise ApplyError(f"{e} (the profile was already switched live: {lines[0]})")
     finally:
@@ -738,6 +771,7 @@ def set_card_audio(card: str, rate: str, fmt: str) -> list:
                           CARD_FORMATS.get(w["format"], "default format")])
     idx, args = mods[card]
     lines = []
+    streams = stream_snapshot()
     current = {k: next((v.strip('"') for a, v in args if a == k), "") for k in want}
     if current != want:
         new_args = " ".join([f"{k}={v}" for k, v in args if k not in want]
@@ -775,7 +809,8 @@ def set_card_audio(card: str, rate: str, fmt: str) -> list:
         return [f"card_options: {label} " + (" ".join(f"{k}={v}" for k, v in want.items() if v)
                                              or "rate and format removed (Auto)")]
     try:
-        return lines + change_and_apply(lambda entries, descs: [], edit_options)
+        out = lines + change_and_apply(lambda entries, descs: [], edit_options)
+        return out + restore_streams(streams)
     finally:
         mark_busy()
 
