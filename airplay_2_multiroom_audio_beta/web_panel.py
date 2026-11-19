@@ -457,7 +457,10 @@ def state() -> dict:
         choices.append({"name": n, "description": s.get("description", ""), "kind": kind,
                         "master": master})
 
-    pa_cards = list_cards()
+    # By name (PCI address), not PulseAudio's order: a card that is reloaded
+    # (rate, format) gets a new index and would otherwise jump to the end.
+    pa_cards = sorted(list_cards(), key=lambda c: c["name"])
+    cards.sort(key=lambda c: c["name"])
     for c in pa_cards:
         c["outputs"] = card_outputs(c["name"], [s["name"] for s in cards])
     zlist = zones()
