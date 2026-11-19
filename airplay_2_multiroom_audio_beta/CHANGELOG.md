@@ -5,6 +5,17 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.193)
+
+- Line in, step 2: a Line in section in the web panel. Switch it on, choose
+  the AirPlay receiver to send to (found on the network, e.g. one of Music
+  Assistant's AirPlay Receiver plugin receivers), and set the signal
+  threshold, how long to wait after it goes quiet, and an optional gain.
+  The state and the input's level update live. linein_airplay.py now runs
+  as a service with the add-on (log: /config/line-in/linein.log) and does
+  nothing until switched on; it can still be run by hand for testing.
+- Includes 0.192 (--gain).
+
 ### Added (0.192)
 
 - Line in to AirPlay: --gain DB boosts a quiet input before it is sent,
