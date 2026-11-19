@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.195)
+
+- Panel: sound cards stay in the same order (by their PCI address, Bluetooth
+  last) instead of the changed card jumping to the end after a sample rate,
+  format or profile change.
+
 ### Fixed (0.194)
 
 - Changing a sound card's sample rate, format or profile in the panel no
