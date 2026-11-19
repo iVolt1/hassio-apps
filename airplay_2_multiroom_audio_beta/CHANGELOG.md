@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.198)
+
+- Panel: "Download logs" (top right) saves one zip with every log of the
+  add-on (zones, zone manager, Cast and AirPlay 1 bridges, line in, panel,
+  startup), the panel's settings, the zones' overrides and a PulseAudio
+  snapshot (cards, sinks, streams, sources, modules) in diagnostics.txt.
+
 ### Added (0.197)
 
 - Zones that get stuck are restarted automatically. A zone in a session

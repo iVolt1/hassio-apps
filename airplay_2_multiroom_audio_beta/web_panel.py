@@ -41,6 +41,8 @@ set; that restarts only that zone.
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
   POST /api/linein {"enabled", "target", "threshold_db", "hold_s", "gain_db"}:
                     line in settings (linein_airplay.py picks them up within 2 s)
+  GET  /api/logs.zip: every log of the add-on, its panel settings and a
+                    snapshot of PulseAudio, for a bug report
   POST /api/zone/restart {"key"}: restarts one zone's shairport-sync
   GET  /api/linein/status: the line in service's state and level
   POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
@@ -90,6 +92,7 @@ ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").s
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
 AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))
+LOG_ROOT = Path(os.environ.get("WP_LOG_ROOT", "/config"))   # for /api/logs.zip
 RESTART_DIR = Path(os.environ.get("WP_RESTART_DIR", "/tmp/airplay2_zone_restart"))   # sink_zone_manager.py
 LINEIN_DIR = Path(os.environ.get("WP_LINEIN_DIR", "/config/line-in"))   # linein_airplay.py
 LINEIN_DEFAULTS = {"enabled": False, "target": "", "threshold_db": -50.0, "hold_s": 10.0,
@@ -621,6 +624,45 @@ def mark_busy() -> None:
         PANEL_BUSY_FILE.write_text(str(time.time()))
     except OSError:
         pass
+
+
+def logs_zip() -> bytes:
+    """The add-on's logs, settings and a PulseAudio snapshot, zipped."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    pats = [("shairport-sync/logs", "*.log"), ("cast-bridge/logs", "*.log"),
+            ("ap1-bridge", "*.log"), ("ap1-bridge", "*.json"),
+            ("line-in", "*.log"), ("line-in", "*.json"),
+            ("shairport-sync/config", "*.custom"), ("shairport-sync/config", "port_map.txt"),
+            (".", "panel-settings.json"), (".", "*_state.json")]
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        seen = set()
+        for d, pat in pats:
+            for f in sorted((LOG_ROOT / d).glob(pat)):
+                if f.is_file() and f not in seen:
+                    seen.add(f)
+                    try:
+                        z.write(f, str(f.relative_to(LOG_ROOT)))
+                    except OSError as e:
+                        log.warning("logs.zip: %s: %s", f, e)
+        diag = [f"# {time.strftime('%Y-%m-%d %H:%M:%S %Z')}"]
+        try:
+            opts = json.loads(OPTIONS_FILE.read_text())
+            diag.append("# options (Configuration tab)\n" + json.dumps(
+                {k: v for k, v in opts.items() if k not in rs.panel_settings.PANEL_KEYS}, indent=1))
+        except (OSError, ValueError):
+            pass
+        for args in (("list", "cards", "short"), ("list", "sinks", "short"),
+                     ("list", "sink-inputs", "short"), ("list", "sources", "short"),
+                     ("list", "modules", "short"), ("info",)):
+            ok, out = rs.pactl(*args)
+            diag.append(f"# pactl {' '.join(args)}\n{out}")
+        diag.append("# zones\n" + "\n".join(
+            f"{z['name']}\t{z['kind']}\tport {z['port']}\tpid {z['pid']}\t"
+            f"{'playing' if z['playing'] else 'idle'}\t{z['target']}" for z in zones()))
+        z.writestr("diagnostics.txt", "\n\n".join(diag) + "\n")
+    return buf.getvalue()
 
 
 def restart_zone(key: str) -> list:
@@ -2161,7 +2203,7 @@ def render(st: dict) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
-<header><b>AirPlay 2 Multiroom Audio</b></header>
+<header><b>AirPlay 2 Multiroom Audio</b><a class="btn sec sm" href="api/logs.zip" download style="float:right;text-decoration:none;display:inline-flex;align-items:center" title="Every log of the add-on, its settings and a PulseAudio snapshot, in one zip, for a bug report">Download logs</a></header>
 <main>
 <section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
 <section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
@@ -2177,10 +2219,12 @@ def render(st: dict) -> str:
 
 # -- server ---------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: str, ctype: str):
-        data = body.encode()
+    def _send(self, code: int, body, ctype: str, filename: str = ""):
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -2203,6 +2247,9 @@ class Handler(BaseHTTPRequestHandler):
                            "text/plain; charset=utf-8")
             elif path == "/api/linein/status":
                 self._send(200, json.dumps(linein_status()), "application/json")
+            elif path == "/api/logs.zip":
+                self._send(200, logs_zip(), "application/zip",
+                           f"airplay2-logs-{time.strftime('%Y%m%d-%H%M%S')}.zip")
             elif path == "/api/state":
                 self._send(200, json.dumps(state(), indent=2), "application/json")
             else:
