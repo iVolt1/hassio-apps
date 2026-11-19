@@ -102,6 +102,21 @@ HEALTHY_AFTER_SECONDS = 60
 LOG_MAX_BYTES = 20 * 1024 * 1024
 LOG_KEEP_BYTES = 2 * 1024 * 1024
 
+# A zone that is playing (a session started and not stopped) logs
+# statistics every 8 s. When that has worked at least once since the zone
+# started and then stops for STALL_SECONDS while the session goes on, the
+# zone is stuck (receiving audio but not playing it) and is restarted; at
+# most once per STALL_RESTART_GAP_SECONDS.
+STALL_SECONDS = 30
+STALL_RESTART_GAP_SECONDS = 120
+PLAY_START_RE = re.compile(rb"Connection \d+: [^\n]*?playback\. ")
+PLAY_STOP_RE = re.compile(rb"Connection \d+: Playback stopped")
+STATS_RE = re.compile(rb'"player\.c:\d+"\s+-?\d+\.\d+\s')
+# A pause stops the statistics too. shairport-sync logs pause and play only
+# at -vv and up, so the check only runs once one of these has been seen.
+PAUSE_RE = re.compile(rb"SETRATEANCHORI Pause playing")
+RESUME_RE = re.compile(rb"SETRATEANCHORI Start playing")
+
 # The web panel asks for a zone restart by putting a file with the zone's
 # key here (web_panel.py restart_zone()).
 RESTART_DIR = Path(os.environ.get("SZM_RESTART_DIR", "/tmp/airplay2_zone_restart"))
@@ -454,6 +469,12 @@ class Zone:
         self.failures = 0
         self.dead_noted = False
         self.next_restart_at = 0.0
+        self.log_pos = 0
+        self.playing = False
+        self.stats_seen = False        # statistics are on for this zone
+        self.anchors_seen = False      # pause/play are logged (-vv)
+        self.last_progress = 0.0
+        self.last_stall_restart = 0.0
 
     def _ensure_custom_file(self):
         # Per-zone user overrides, spliced into the general block via
@@ -556,6 +577,11 @@ pulseaudio :
                 stdout=fh, stderr=subprocess.STDOUT)
         self.started_at = time.time()
         self.dead_noted = False
+        try:
+            self.log_pos = self.log_file.stat().st_size
+        except OSError:
+            self.log_pos = 0
+        self.playing, self.stats_seen, self.anchors_seen = False, False, False
         log.info("Started zone '%s' (sink %s, port %d, udp %d, pid %d)",
                  self.display_name, self.pa_sink, self.rtsp_port, self.udp_base, self.proc.pid)
 
@@ -579,6 +605,35 @@ pulseaudio :
         self.terminate()
         self.wait_or_kill(time.time() + STOP_GRACE_SECONDS)
 
+    def _stalled(self, now: float) -> bool:
+        """Reads what the zone logged since the last check and says whether
+        it is stuck in a session (see STALL_SECONDS)."""
+        try:
+            with open(self.log_file, "rb") as f:
+                size = f.seek(0, 2)
+                if self.log_pos > size:
+                    self.log_pos = 0
+                start = max(self.log_pos, size - 4 * 1024 * 1024)
+                f.seek(start)
+                new = f.read(size - start)
+                self.log_pos = size
+        except OSError:
+            return False
+        for line in new.splitlines():
+            if PLAY_START_RE.search(line):
+                self.playing, self.last_progress = True, now
+            elif PLAY_STOP_RE.search(line):
+                self.playing = False
+            elif PAUSE_RE.search(line):
+                self.anchors_seen, self.playing = True, False
+            elif RESUME_RE.search(line):
+                self.anchors_seen, self.playing, self.last_progress = True, True, now
+            elif STATS_RE.search(line):
+                self.stats_seen, self.last_progress = True, now
+        return (self.playing and self.stats_seen and self.anchors_seen
+                and now - self.last_progress > STALL_SECONDS
+                and now - self.last_stall_restart > STALL_RESTART_GAP_SECONDS)
+
     def restart(self, why: str):
         log.info("Restarting zone '%s' (%s)", self.display_name, why)
         self.stop()
@@ -596,6 +651,12 @@ pulseaudio :
         if trim_log(self.log_file):
             log.info("Trimmed the log of '%s' (over %d MB)", self.display_name,
                      LOG_MAX_BYTES // 1048576)
+            self.log_pos = 0
+        if p.poll() is None and self._stalled(now):
+            self.last_stall_restart = now
+            self.restart(f"stalled: playing, but no statistics for {STALL_SECONDS} s "
+                         "(audio arriving but not played)")
+            return
         if p.poll() is None:
             if now - self.started_at > HEALTHY_AFTER_SECONDS:
                 self.failures = 0

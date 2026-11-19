@@ -5,6 +5,16 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.197)
+
+- Zones that get stuck are restarted automatically. A zone in a session
+  (playing, not paused) that stops logging its statistics for 30 s is
+  receiving audio but not playing it; the zone manager restarts that zone's
+  shairport-sync (at most once every 2 minutes) and notes it in the zone's
+  log and its own. Seen after a skip or seek on Kitchen and Dining Room.
+  Needs the default log level (vv) or higher: below that, pauses aren't
+  logged and the check stays off.
+
 ### Added (0.196)
 
 - Panel: "Restart zone" under a zone's More restarts just that zone's
