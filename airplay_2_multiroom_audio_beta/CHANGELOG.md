@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.201)
+
+- Panel wording: the first tab and its table are "AirPlay 2 receivers and
+  PulseAudio sinks"; "Restart zone" is now "Restart player"; the Sound cards
+  hint says free stereo pairs can become new zones. (0.200 skipped, as it
+  would read like 0.2.)
+
 ### Changed (0.199)
 
 - Panel: tabs at the top (Zones, Sound cards, Combine sinks, Line in,
