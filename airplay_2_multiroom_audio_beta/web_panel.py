@@ -39,6 +39,9 @@ set; that restarts only that zone.
   POST /api/combine/create {"name", "description", "sinks": [...]}: adds a
                     combine sink (two or more member sinks of any kind)
   POST /api/combine/remove {"index"}: removes a combine_sinks entry
+  POST /api/linein {"enabled", "target", "threshold_db", "hold_s", "gain_db"}:
+                    line in settings (linein_airplay.py picks them up within 2 s)
+  GET  /api/linein/status: the line in service's state and level
   POST /api/combine/adopt  {"name"}: adds an unmanaged combine sink as is
   POST /api/combine/unload {"name"}: unloads an unmanaged combine sink now
   POST /api/ap1/hide {"key", "hidden"}: removes an AirPlay 1 bridge from the
@@ -85,7 +88,10 @@ PORT = int(os.environ.get("WEB_PANEL_PORT", "8285"))
 ALLOWED = set(os.environ.get("WEB_PANEL_ALLOWED", "172.30.32.2,127.0.0.1,::1").split(","))
 OPTIONS_FILE = Path(os.environ.get("RS_OPTIONS_FILE", "/data/options.json"))
 CAST_DISCOVERED_FILE = Path(os.environ.get("WP_CAST_DISCOVERED", "/config/cast-bridge/discovered.json"))
-AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))   # ap1_bridge_manager.py
+AP1_DIR = Path(os.environ.get("WP_AP1_DIR", "/config/ap1-bridge"))
+LINEIN_DIR = Path(os.environ.get("WP_LINEIN_DIR", "/config/line-in"))   # linein_airplay.py
+LINEIN_DEFAULTS = {"enabled": False, "target": "", "threshold_db": -50.0, "hold_s": 10.0,
+                   "gain_db": 0.0}   # ap1_bridge_manager.py
 ZONE_CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
 SUPERVISOR_URL = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 REMAP_SINKS = os.environ.get("REMAP_SINKS_SCRIPT", "/usr/sbin/remap_sinks.py")
@@ -1055,6 +1061,71 @@ def hide_ap1(key: str, hidden: bool) -> list:
     return [f"{dev['name']}: bridge removed from the list"] + [l for l in lines if l != "nothing changed"]
 
 
+def _read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def linein_settings() -> dict:
+    return {**LINEIN_DEFAULTS, **_read_json(LINEIN_DIR / "settings.json", {})}
+
+
+def set_linein(body: dict) -> list:
+    """Saves the Line in settings; the service applies them within 2 s."""
+    s = linein_settings()
+    s["enabled"] = bool(body.get("enabled"))
+    s["target"] = str(body.get("target", "")).strip()
+    for k, lo, hi in (("threshold_db", -90, 0), ("hold_s", 1, 3600), ("gain_db", 0, 40)):
+        try:
+            v = float(body.get(k, s[k]))
+        except (TypeError, ValueError):
+            raise ApplyError(f"{k}: not a number")
+        if not lo <= v <= hi:
+            raise ApplyError(f"{k} must be between {lo} and {hi}")
+        s[k] = v
+    if s["enabled"] and not s["target"]:
+        raise ApplyError("choose the AirPlay receiver to send to")
+    LINEIN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LINEIN_DIR / "settings.json.tmp"
+    tmp.write_text(json.dumps(s, indent=1))
+    os.replace(tmp, LINEIN_DIR / "settings.json")
+    if not s["enabled"]:
+        return ["line in: off"]
+    return [f"line in: on, to {s['target']} (threshold {s['threshold_db']:g} dBFS, "
+            f"hold {s['hold_s']:g} s" + (f", gain {s['gain_db']:g} dB" if s["gain_db"] else "") + ")"]
+
+
+def linein_status() -> dict:
+    st = _read_json(LINEIN_DIR / "status.json", {})
+    if st and time.time() - float(st.get("time", 0)) > 15 and st.get("state") not in ("off",):
+        st = {**st, "state": "not running", "message": "the line in service isn't updating"}
+    return st or {"state": "not running"}
+
+
+def linein_html() -> str:
+    e = html.escape
+    s = linein_settings()
+    names = _read_json(LINEIN_DIR / "discovered.json", [])
+    if s["target"] and s["target"] not in names:
+        names = [s["target"]] + names
+    opts = '<option value="">(choose)</option>' + "".join(
+        f'<option{" selected" if n == s["target"] else ""}>{e(n)}</option>' for n in names)
+    num = lambda k, step: (f'<input class="li_f" data-f="{k}" inputmode="decimal" '
+                           f'value="{e(f"{s[k]:g}")}" style="width:5em">')
+    return (f'<div class="li_row" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">'
+            f'<label style="min-height:44px;display:flex;align-items:center;gap:6px">'
+            f'<input type="checkbox" class="li_f" data-f="enabled"{" checked" if s["enabled"] else ""}> On</label>'
+            f'<label>Send to<select class="li_f" data-f="target">{opts}</select></label>'
+            f'<label>Signal above (dBFS){num("threshold_db", 1)}</label>'
+            f'<label>Stop after quiet (s){num("hold_s", 1)}</label>'
+            f'<label>Gain (dB){num("gain_db", 1)}</label>'
+            f'<button class="btn" id="lisave" type="button">Save</button></div>'
+            f'<p class="sub" id="li_status" style="margin-top:8px">&nbsp;</p>'
+            f'<pre id="liresult" hidden></pre>')
+
+
 def adopt_combine(name: str) -> list:
     c = next((c for c in state()["combine_sinks"] if c["name"] == name and not c["managed"]), None)
     if not c or not c.get("adoptable"):
@@ -1482,12 +1553,14 @@ input.nm.changed{border-color:#4a6a96}
 form.create .kgroup label{display:flex;gap:10px;align-items:flex-start;padding:8px 0;margin:0;border-top:1px solid #23272f;cursor:pointer;font-size:14px;color:#e6e8eb;font-weight:400}
 .kgroup input{width:18px;height:18px;margin-top:2px;flex:none}
 #kwarn{color:#f0b26a;font-size:13px}
-pre#result,pre#result_c,pre#zresult,pre#cresult,pre#kresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
-pre#result.err,pre#result_c.err,pre#zresult.err,pre#cresult.err,pre#kresult.err{color:#f0b26a}
+pre#result,pre#result_c,pre#zresult,pre#cresult,pre#kresult,pre#liresult{margin:14px 0 0;border:1px solid #2a2f38;border-radius:12px;background:#0d0f13;padding:14px 16px;font:12px/1.7 ui-monospace,monospace;color:#b8c0ca;white-space:pre-wrap}
+pre#result.err,pre#result_c.err,pre#zresult.err,pre#cresult.err,pre#kresult.err,pre#liresult.err{color:#f0b26a}
 .btn.sm{min-height:36px;padding:0 12px;font-size:13px;margin-left:10px}
 form.create{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;border:1px dashed #353b46;border-radius:12px;padding:16px;margin-top:14px}
 form.create label,form.create .lbl{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
 form.create select,select.crate_sel{min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
+div.li_row label{font-size:12px;color:#9aa3ae;font-weight:500}
+div.li_row input.li_f:not([type=checkbox]),div.li_row select.li_f{display:block;margin-top:6px;min-height:44px;padding:0 12px;border-radius:8px;border:1px solid #353b46;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
 tr.zedit td{background:#161a21}
 div.zform{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}
 div.zform label{display:block;font-size:12px;color:#9aa3ae;font-weight:500;margin-bottom:6px}
@@ -1550,6 +1623,26 @@ async function post(url, body, outId = 'result', delay = 3000) {
   } catch (e) { out.className = 'err'; out.textContent = 'Request failed: ' + e; }
   allButtons().forEach(b => b.disabled = false); refresh(); cardChanged();
 }
+const liSave = document.getElementById('lisave');
+if (liSave) liSave.addEventListener('click', () => {
+  const b = {};
+  document.querySelectorAll('.li_f').forEach(f => { b[f.dataset.f] = f.type === 'checkbox' ? f.checked : f.value; });
+  post('api/linein', b, 'liresult', 1500);
+});
+async function liPoll() {
+  const el = document.getElementById('li_status');
+  if (!el) return;
+  try {
+    const st = await (await fetch('api/linein/status')).json();
+    const lv = st.level_db !== undefined && st.level_db !== null && st.state !== 'off'
+      ? ` · level ${st.level_db <= -119 ? 'silent' : Math.round(st.level_db) + ' dBFS'}` : '';
+    const sent = st.sent_db !== undefined && st.sent_db !== null ? ` (sent at ${Math.round(st.sent_db)} dBFS)` : '';
+    const rcv = st.state === 'sending' && st.receiver ? ` to ${st.receiver}` : '';
+    const src = st.source ? ` · input ${st.source}` : '';
+    el.textContent = `State: ${st.state}${rcv}${lv}${sent}${st.message ? ' · ' + st.message : ''}${src}`;
+  } catch (e) { el.textContent = 'State: unknown (' + e + ')'; }
+}
+liPoll(); setInterval(liPoll, 2000);
 if (applyBtn) applyBtn.addEventListener('click', () => {
   const rows = [];
   document.querySelectorAll('tr.prow').forEach(r => {
@@ -2017,6 +2110,8 @@ def render(st: dict) -> str:
 <section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
 <section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
 <button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
+<section><h2>Line in</h2><p class="sub">Sends the default PulseAudio input to an AirPlay receiver, such as one of Music Assistant's AirPlay Receiver plugin receivers, while there's a signal on it. Receivers are found on the network; the list fills in a few seconds after the add-on starts.</p>
+{linein_html()}</section>
 <section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format restarts that card's zones.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
 <section><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
@@ -2050,6 +2145,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/debug/cards":
                 self._send(200, pactl_text("list", "cards") or "(pactl list cards returned nothing)\n",
                            "text/plain; charset=utf-8")
+            elif path == "/api/linein/status":
+                self._send(200, json.dumps(linein_status()), "application/json")
             elif path == "/api/state":
                 self._send(200, json.dumps(state(), indent=2), "application/json")
             else:
@@ -2066,7 +2163,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0].rstrip("/")
         if path not in ("/api/apply", "/api/create", "/api/adopt", "/api/zone", "/api/profile",
-                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt",
+                        "/api/combine/create", "/api/combine/remove", "/api/combine/adopt", "/api/linein",
                         "/api/combine/unload", "/api/ap1/hide",
                         "/api/create_defaults", "/api/bt_reset", "/api/zone/enabled",
                         "/api/sink/enabled", "/api/sink/delete", "/api/combine/enabled",
@@ -2109,6 +2206,8 @@ class Handler(BaseHTTPRequestHandler):
                 lines = create_combine(str(body.get("name", "")), str(body.get("description", "")), sinks_)
             elif path == "/api/combine/remove":
                 lines = remove_combine(body.get("index"))
+            elif path == "/api/linein":
+                lines = set_linein(body)
             elif path == "/api/combine/adopt":
                 lines = adopt_combine(str(body.get("name", "")))
             elif path == "/api/combine/unload":

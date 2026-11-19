@@ -40,6 +40,7 @@ mkdir -p /config/shairport-sync/logs /config/cast-bridge/logs
 : > /config/shairport-sync/logs/sink_zone_manager.log
 : > /config/cast-bridge/logs/cast_bridge_manager.log
 mkdir -p /config/ap1-bridge && : > /config/ap1-bridge/ap1_bridge_manager.log
+mkdir -p /config/line-in && : > /config/line-in/linein.log
 : > /config/shairport-sync/logs/web_panel.log
 
 BASE_DIR="/etc/s6-overlay/s6-rc.d"
@@ -524,6 +525,23 @@ exec ${NETNS_EXEC}python3 /usr/sbin/ap1_bridge_manager.py >> /config/ap1-bridge/
 EOF
     chmod +x "${AP1_MANAGER_SERVICE}/run"
     touch "${CONTENTS_DIR}/airplay2-ap1bridge-manager"
+fi
+
+# Line in -> an AirPlay receiver (linein_airplay.py), set up in the web
+# panel's Line in section; idle until switched on there. On the host network
+# (not the zones' namespace), where Music Assistant's own AirPlay Receiver
+# plugin receivers are found and reached.
+LINEIN_SERVICE="${BASE_DIR}/airplay2-linein"
+if [ ! -d "$LINEIN_SERVICE" ]; then
+    mkdir -p "$LINEIN_SERVICE"
+    echo "longrun" > "${LINEIN_SERVICE}/type"
+    cat > "${LINEIN_SERVICE}/run" <<EOF
+#!/usr/bin/with-contenv bashio
+mkdir -p /config/line-in
+exec python3 /usr/sbin/linein_airplay.py --service >> /config/line-in/linein.log 2>&1
+EOF
+    chmod +x "${LINEIN_SERVICE}/run"
+    touch "${CONTENTS_DIR}/airplay2-linein"
 fi
 
 # One manager for every PulseAudio-sink zone (see the comment above).
