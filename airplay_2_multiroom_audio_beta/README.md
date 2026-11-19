@@ -1,16 +1,33 @@
 # AirPlay 2 Multiroom Audio
 
-Turn your existing PulseAudio-backed audio hardware **and** your Google Cast (Chromecast/Google Home) speakers into AirPlay 2 receivers, so you can play to all of them — individually or grouped — from any AirPlay 2 source (iPhone, iPad, Mac).
+Everything you need to manage the sound cards and USB audio devices on your Home Assistant, and to turn them, your Bluetooth speakers and your Chromecasts into AirPlay 2 speakers you can play to one at a time or all together from Music Assistant or your Apple devices.
 
-This addon merges what used to be two separate things — AirPlay 2 receivers for local sound cards, and a bridge that relays AirPlay 2 audio to Google Cast devices — into a single Home Assistant addon.
+- **Manage your sound cards:** choose each card's profile, sample rate and bit depth, and split a 5.1/7.1 card into separate stereo pairs, each its own room.
+- **Every room becomes an AirPlay 2 speaker:** each sound card or USB audio output, each stereo pair, each Bluetooth speaker and each Chromecast.
+- **Group rooms in sync:** with each other and with HomePods, TVs and other AirPlay 2 speakers.
+- **Bring older speakers along:** AirPlay 1-only receivers become AirPlay 2 speakers that can join groups.
+- **One room, several speakers:** a combine sink plays to several outputs as one speaker.
+- **Line in:** a turntable, TV or PC plugged into the default input plays through Music Assistant in any room.
+- **Set up in a web panel:** rooms on and off, names, delay and volume limits, nothing to type by hand.
 
-## What it does
+## Music Assistant and Apple devices together
 
-- Scans your system's PulseAudio sinks and creates an [AirPlay 2](https://github.com/mikebrady/shairport-sync) receiver (via `shairport-sync`) for each one, so each physical output (a zone, a room, a card's channel pair) shows up as its own AirPlay 2 speaker.
-- Scans your network for Google Cast devices (speakers, speaker groups/stereo pairs, Cast-enabled soundbars) and creates a matching AirPlay 2 receiver for each one too, relaying the audio through to Cast — so devices that don't natively speak AirPlay 2 still show up as AirPlay 2 speakers.
-- Skips any Cast device that's already advertising its own, real AirPlay 2 receiver (some TVs and soundbars have this built in) — it's detected automatically, not configured by name, so you never end up with two entries for the same physical device.
-- All AirPlay 2 zones — sink-backed and Cast-backed alike — support AirPlay 2's native multi-room grouping, so you can select several speakers at once from your source device.
-- This addon doesn't limit you to just the zones it creates: any other AirPlay 2 receiver already on your network (a HomePod, a smart TV, a soundbar with AirPlay 2 built in, another addon's receivers) shows up in your source's AirPlay picker right alongside this addon's zones, and can be grouped together with them the same way, since AirPlay 2 multi-room isn't specific to this addon — it's a standard feature of the protocol itself.
+Play from Music Assistant for whole-house listening and from your iPhone, iPad or Mac when you just want to send something quickly; both work on the same speakers. In Music Assistant, play to every AirPlay speaker through Music Assistant's **Sendspin bridge** (the player's output set to Sendspin): the rooms from this add-on, AirPlay 1 devices, this add-on's Chromecast rooms and any other AirPlay speaker. Sendspin then keeps them all, and your other Sendspin players, in step from one clock. Your Apple devices use AirPlay 2 directly, through the AirPlay picker.
+
+| Speaker | From Music Assistant | From an iPhone, iPad or Mac |
+|---|---|---|
+| A room from this add-on (sound card, stereo pair, USB audio, Bluetooth, combine sink) | the room's AirPlay player, output Sendspin | the room in the AirPlay picker |
+| A Chromecast room from this add-on | its AirPlay player, output Sendspin | the room in the AirPlay picker |
+| An AirPlay 1-only device (e.g. TuneAero) | **the device's own** AirPlay player, output Sendspin | **this add-on's bridge room** for it, so it can be grouped |
+| Other AirPlay 2 speakers (HomePod, TV, soundbar) | their AirPlay player, output Sendspin | the AirPlay picker |
+| Line in | Music Assistant's AirPlay Receiver plugin player that the Line in tab sends to | (not used) |
+
+Tips:
+- **Start playback on a wired player**, then add the others to its group. If the group's first player is on Wi-Fi or is a browser tab and it drops out, the whole group stops; as a member, only that player does.
+- **Players on Wi-Fi:** set Music Assistant's Sendspin output to FLAC. It needs about half the bandwidth of uncompressed audio and rides out slow moments better.
+- **An AirPlay 1 device takes one sender at a time.** Don't play to both its own player and this add-on's bridge room from Music Assistant: the two take the device from each other.
+- **Taking a room over from your iPhone** works: the room switches to the iPhone, and Music Assistant can play there again afterwards.
+- **Chromecasts** don't stay as tightly in step as the other rooms. They're best in their own part of the house, or in their own groups.
 
 ## Requirements
 
