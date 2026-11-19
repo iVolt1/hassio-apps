@@ -673,7 +673,7 @@ def restart_zone(key: str) -> list:
         raise ApplyError(f"{key}: no such zone running; reload the page")
     RESTART_DIR.mkdir(parents=True, exist_ok=True)
     (RESTART_DIR / f"{time.time_ns()}").write_text(key)
-    return [f"{z['name']}: restarting (within 5 s; the other zones keep playing)"]
+    return [f"{z['name']}: restarting the player (within 5 s; the other players keep playing)"]
 
 
 def stream_snapshot() -> dict:
@@ -2095,8 +2095,8 @@ def render(st: dict) -> str:
                 f'Remove bridge: switches it off and takes it off this list (it can be listed again below the table).</p></td></tr>')
         elif not cast:
             restart = (f'<button class="btn sec sm zrestart" type="button" data-key="{e(key)}" '
-                       f'title="Restart this zone\'s shairport-sync; the other zones keep playing">'
-                       f'Restart zone</button>' if z else "")
+                       f'title="Restart this player\'s shairport-sync; the other players keep playing">'
+                       f'Restart player</button>' if z else "")
             prows.append(
                 f'<tr class="zedit" id="{rid}" data-row="{rid}_r" hidden><td colspan="9"><div class="zform">'
                 f'<div style="display:flex;gap:0;align-items:flex-end">{restart}{more_actions}</div>'
@@ -2222,10 +2222,10 @@ def render(st: dict) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
 <header><b>AirPlay 2 Multiroom Audio</b><a class="btn sec sm" href="api/logs.zip" download style="text-decoration:none;display:inline-flex;align-items:center" title="Every log of the add-on, its settings and a PulseAudio snapshot, in one zip, for a bug report">Download logs</a></header>
-<nav class="tabs" aria-label="Sections"><button type="button" data-tab="zones">Zones</button><button type="button" data-tab="cards">Sound cards</button><button type="button" data-tab="combine">Combine sinks</button><button type="button" data-tab="linein">Line in</button><button type="button" data-tab="bluetooth">Bluetooth</button></nav>
+<nav class="tabs" aria-label="Sections"><button type="button" data-tab="zones">AirPlay 2 receivers and PulseAudio sinks</button><button type="button" data-tab="cards">Sound cards</button><button type="button" data-tab="combine">Combine sinks</button><button type="button" data-tab="linein">Line in</button><button type="button" data-tab="bluetooth">Bluetooth</button></nav>
 <main>
-<section data-tab="zones"><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
-<section data-tab="cards"><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format reloads the card: its zones pause for a moment and carry on.</p>
+<section data-tab="zones"><h1>AirPlay 2 receivers and PulseAudio sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
+<section data-tab="cards"><h2>Sound cards</h2><p class="sub">Free stereo pairs can become new zones. Changing a profile, sample rate or format reloads the card: its zones pause for a moment and carry on.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
 <section data-tab="combine"><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
 {combine_html}</section>
