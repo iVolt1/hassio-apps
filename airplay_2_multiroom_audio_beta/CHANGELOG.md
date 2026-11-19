@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (0.199)
+
+- Panel: tabs at the top (Zones, Sound cards, Combine sinks, Line in,
+  Bluetooth) instead of one long page; it opens on Zones. The tab shown is
+  kept in the address (#cards, ...), so the reload after Apply comes back
+  to it, and a tab can be bookmarked.
+
 ### Added (0.198)
 
 - Panel: "Download logs" (top right) saves one zip with every log of the

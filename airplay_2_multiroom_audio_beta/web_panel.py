@@ -1620,7 +1620,11 @@ def apply_players(rows: list) -> list:
 # -- page -----------------------------------------------------------------
 CSS = """
 body{margin:0;background:#111318;color:#e6e8eb;font:14px system-ui,sans-serif}
-header{padding:20px 32px;border-bottom:1px solid #2a2f38}
+header{padding:20px 32px 8px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+nav.tabs{display:flex;flex-wrap:wrap;gap:4px;padding:0 24px;border-bottom:1px solid #2a2f38}
+nav.tabs button{background:none;border:0;border-bottom:2px solid transparent;color:#9aa3ae;padding:0 14px;min-height:44px;font:600 14px system-ui,sans-serif;cursor:pointer}
+nav.tabs button:hover{color:#e6e8eb}
+nav.tabs button.on{color:#e6e8eb;border-bottom-color:#4a8fe7}
 header b{font-size:18px;font-weight:600}
 main{max-width:1280px;margin:0 auto;padding:28px 32px;display:flex;flex-direction:column;gap:28px}
 h1,h2{margin:0;font-weight:600}h1{font-size:22px}h2{font-size:20px}
@@ -1883,6 +1887,20 @@ document.querySelectorAll('button.copy').forEach(b => b.addEventListener('click'
     .catch(() => { const r = document.createRange(); r.selectNode(b.previousElementSibling);
                    getSelection().removeAllRanges(); getSelection().addRange(r); });
 }));
+
+// Tabs: the one shown is kept in the address (#cards ...), so the reload
+// after Apply comes back to it.
+function showTab(t) {
+  const secs = [...document.querySelectorAll('section[data-tab]')];
+  if (!secs.some(x => x.dataset.tab === t)) t = 'zones';
+  secs.forEach(x => { x.hidden = x.dataset.tab !== t; });
+  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+}
+document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => {
+  history.replaceState(null, '', '#' + b.dataset.tab);
+  showTab(b.dataset.tab);
+}));
+showTab(location.hash.slice(1));
 """
 
 
@@ -2203,17 +2221,18 @@ def render(st: dict) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AirPlay 2 Multiroom Audio</title><style>{CSS}</style></head><body>
-<header><b>AirPlay 2 Multiroom Audio</b><a class="btn sec sm" href="api/logs.zip" download style="float:right;text-decoration:none;display:inline-flex;align-items:center" title="Every log of the add-on, its settings and a PulseAudio snapshot, in one zip, for a bug report">Download logs</a></header>
+<header><b>AirPlay 2 Multiroom Audio</b><a class="btn sec sm" href="api/logs.zip" download style="text-decoration:none;display:inline-flex;align-items:center" title="Every log of the add-on, its settings and a PulseAudio snapshot, in one zip, for a bug report">Download logs</a></header>
+<nav class="tabs" aria-label="Sections"><button type="button" data-tab="zones">Zones</button><button type="button" data-tab="cards">Sound cards</button><button type="button" data-tab="combine">Combine sinks</button><button type="button" data-tab="linein">Line in</button><button type="button" data-tab="bluetooth">Bluetooth</button></nav>
 <main>
-<section><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
-<section><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
-<button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
-<section><h2>Line in</h2><p class="sub">Sends the default PulseAudio input to an AirPlay receiver, such as one of Music Assistant's AirPlay Receiver plugin receivers, while there's a signal on it. Receivers are found on the network; the list fills in a few seconds after the add-on starts.</p>
-{linein_html()}</section>
-<section><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format reloads the card: its zones pause for a moment and carry on.</p>
+<section data-tab="zones"><h1>AirPlay 2 receivers and Sinks</h1><p class="sub">Every sink and its AirPlay 2 receiver. Edit several rows, then Apply.</p>{zones_html}</section>
+<section data-tab="cards"><h2>Sound cards</h2><p class="sub">Free pairs can become new zones. Changing a profile, sample rate or format reloads the card: its zones pause for a moment and carry on.</p>
 <div class="cards">{cards or '<p class="sub">No sound cards found.</p>'}</div><pre id="cresult" hidden></pre></section>
-<section><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
+<section data-tab="combine"><h2>Create combine sink</h2><p class="sub">One AirPlay zone that plays to several sinks at once — handy for senders that can't group zones. Members on different sound cards are kept in sync by resampling.</p>
 {combine_html}</section>
+<section data-tab="linein"><h2>Line in</h2><p class="sub">Sends the default PulseAudio input to an AirPlay receiver, such as one of Music Assistant's AirPlay Receiver plugin receivers, while there's a signal on it. Receivers are found on the network; the list fills in a few seconds after the add-on starts.</p>
+{linein_html()}</section>
+<section data-tab="bluetooth"><h2>Bluetooth</h2><p class="sub">Power-cycle the Bluetooth adapter, for when Bluetooth speakers stay connected but stop playing. Their zones drop for a few seconds and reconnect.</p>
+<button class="btn sec" id="btreset" type="button">Reset Bluetooth adapter</button><pre id="btresult" hidden></pre></section>
 </main><script>{SCRIPT}</script></body></html>"""
 
 
