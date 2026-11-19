@@ -5,6 +5,19 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.196)
+
+- Panel: "Restart zone" under a zone's More restarts just that zone's
+  shairport-sync (within 5 s); the other zones keep playing. For a zone that
+  is stuck, where before only an add-on restart helped.
+- Zone logs are cut back to their last 2 MB once they pass 20 MB, with a
+  note at the top (a stalled zone once logged 49 MB of one repeated line).
+
+### Changed (0.196)
+
+- Panel: the Sound cards hint now says what a profile, rate or format change
+  does: the card reloads and its zones pause for a moment.
+
 ### Fixed (0.195)
 
 - Panel: sound cards stay in the same order (by their PCI address, Bluetooth

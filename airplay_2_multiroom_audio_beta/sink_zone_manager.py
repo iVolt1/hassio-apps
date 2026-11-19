@@ -97,7 +97,38 @@ EVENT_DEBOUNCE_SECONDS = 2.0
 STOP_GRACE_SECONDS = 4.0
 HEALTHY_AFTER_SECONDS = 60
 
+# A zone's log is cut back to its last LOG_KEEP_BYTES once it passes
+# LOG_MAX_BYTES (a stalled zone can log the same line thousands of times).
+LOG_MAX_BYTES = 20 * 1024 * 1024
+LOG_KEEP_BYTES = 2 * 1024 * 1024
+
+# The web panel asks for a zone restart by putting a file with the zone's
+# key here (web_panel.py restart_zone()).
+RESTART_DIR = Path(os.environ.get("SZM_RESTART_DIR", "/tmp/airplay2_zone_restart"))
+
 DUPLICATE_SUFFIX_RE = re.compile(r"\.\d+$")
+
+
+def trim_log(path: Path) -> bool:
+    """Cuts a log back to its last LOG_KEEP_BYTES (from a line start) once it
+    is over LOG_MAX_BYTES. shairport-sync appends to it (O_APPEND), so it
+    carries on at the new end. True if it was trimmed."""
+    try:
+        size = path.stat().st_size
+        if size <= LOG_MAX_BYTES:
+            return False
+        with open(path, "r+b") as f:
+            f.seek(size - LOG_KEEP_BYTES)
+            tail = f.read()
+            tail = tail[tail.find(b"\n") + 1:]
+            note = (f"{time.strftime('%a %b %d %H:%M:%S %Z %Y')} - log was over "
+                    f"{LOG_MAX_BYTES // 1048576} MB: kept the last {len(tail) // 1024} kB\n").encode()
+            f.seek(0)
+            f.write(note + tail)
+            f.truncate()
+        return True
+    except OSError:
+        return False
 
 
 # -- shared port_map.txt ------------------------------------------------
@@ -548,10 +579,23 @@ pulseaudio :
         self.terminate()
         self.wait_or_kill(time.time() + STOP_GRACE_SECONDS)
 
+    def restart(self, why: str):
+        log.info("Restarting zone '%s' (%s)", self.display_name, why)
+        self.stop()
+        try:
+            with open(self.log_file, "ab") as fh:
+                fh.write(f"{time.strftime('%a %b %d %H:%M:%S %Z %Y')} - restarting: {why}\n".encode())
+        except OSError:
+            pass
+        self.start(fresh=False)
+
     def supervise(self, now: float):
         p = self.proc
         if p is None:
             return
+        if trim_log(self.log_file):
+            log.info("Trimmed the log of '%s' (over %d MB)", self.display_name,
+                     LOG_MAX_BYTES // 1048576)
         if p.poll() is None:
             if now - self.started_at > HEALTHY_AFTER_SECONDS:
                 self.failures = 0
@@ -743,8 +787,26 @@ class Manager:
         log.info("Combine sink(s) %s: all members present again; (re)loading", ", ".join(todo))
         run_remap_sinks("--reload-combine", ",".join(todo))
 
+    def _restart_requests(self):
+        try:
+            reqs = sorted(RESTART_DIR.iterdir())
+        except OSError:
+            return
+        for f in reqs:
+            try:
+                key = f.read_text().strip()
+                f.unlink()
+            except OSError:
+                continue
+            zone = self.zones.get(key)
+            if zone is None:
+                log.warning("Restart asked for zone %r, which isn't running", key)
+            else:
+                zone.restart("asked in the web panel")
+
     def supervise(self):
         now = time.time()
+        self._restart_requests()
         for zone in self.zones.values():
             zone.supervise(now)
         # The web panel saves options (e.g. a zone switched off or on) while
