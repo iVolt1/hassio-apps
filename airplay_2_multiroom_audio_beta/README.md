@@ -10,6 +10,25 @@ Everything you need to manage the sound cards and USB audio devices on your Home
 - **Line in:** a turntable, TV or PC plugged into the default input plays through Music Assistant in any room.
 - **Set up in a web panel:** rooms on and off, names, delay and volume limits, nothing to type by hand.
 
+## Music Assistant and Apple devices together
+
+Play from Music Assistant for whole-house listening and from your iPhone, iPad or Mac when you just want to send something quickly; both work on the same speakers. In Music Assistant, play to every AirPlay speaker through Music Assistant's **Sendspin bridge** (the player's output set to Sendspin): the rooms from this add-on, AirPlay 1 devices, this add-on's Chromecast rooms and any other AirPlay speaker. Sendspin then keeps them all, and your other Sendspin players, in step from one clock. Your Apple devices use AirPlay 2 directly, through the AirPlay picker.
+
+| Speaker | From Music Assistant | From an iPhone, iPad or Mac |
+|---|---|---|
+| A room from this add-on (sound card, stereo pair, USB audio, Bluetooth, combine sink) | the room's AirPlay player, output Sendspin | the room in the AirPlay picker |
+| A Chromecast room from this add-on | its AirPlay player, output Sendspin | the room in the AirPlay picker |
+| An AirPlay 1-only device (e.g. TuneAero) | **the device's own** AirPlay player, output Sendspin | **this add-on's bridge room** for it, so it can be grouped |
+| Other AirPlay 2 speakers (HomePod, TV, soundbar) | their AirPlay player, output Sendspin | the AirPlay picker |
+| Line in | Music Assistant's AirPlay Receiver plugin player that the Line in tab sends to | (not used) |
+
+Tips:
+- **Start playback on a wired player**, then add the others to its group. If the group's first player is on Wi-Fi or is a browser tab and it drops out, the whole group stops; as a member, only that player does.
+- **Players on Wi-Fi:** set Music Assistant's Sendspin output to FLAC. It needs about half the bandwidth of uncompressed audio and rides out slow moments better.
+- **An AirPlay 1 device takes one sender at a time.** Don't play to both its own player and this add-on's bridge room from Music Assistant: the two take the device from each other.
+- **Taking a room over from your iPhone** works: the room switches to the iPhone, and Music Assistant can play there again afterwards.
+- **Chromecasts** don't stay as tightly in step as the other rooms. They're best in their own part of the house, or in their own groups.
+
 ## Requirements
 
 - A Home Assistant host with PulseAudio already set up and your sound hardware's sinks configured (see **Setting up a new zone** below).
