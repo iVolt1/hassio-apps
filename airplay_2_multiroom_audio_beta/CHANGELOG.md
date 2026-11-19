@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.192)
+
+- Line in to AirPlay: --gain DB boosts a quiet input before it is sent,
+  with a limiter so loud passages are turned down instead of clipping. The
+  level log also shows the level sent.
+
 ### Added (0.190)
 
 - Line in to AirPlay, step 1 (run by hand): linein_airplay.py captures

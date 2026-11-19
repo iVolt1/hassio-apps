@@ -21,6 +21,9 @@ Options:
   --hold S           seconds below the threshold before disconnecting (default 10)
   --lead MS          time between capture and play, ms (default 500)
   --always           send all the time, ignoring the level
+  --gain DB          boost the input by DB before sending (default 0), with a
+                     limiter so loud passages are turned down instead of
+                     clipping; the threshold applies to the input before it
   --source NAME      PulseAudio source (default @DEFAULT_SOURCE@)
   --verbose          cliairplay --debug 4
 Stop it with Ctrl-C.
@@ -53,6 +56,28 @@ def level_db(data: bytes) -> float:
     return 20 * math.log10(peak / 32768) if peak else -120.0
 
 
+class Gain:
+    """A fixed boost with a limiter: the gain drops at once when a chunk
+    would clip and comes back slowly (about 6 dB a second)."""
+
+    RELEASE = 10 ** (6 / 20 * CHUNK_MS / 1000)     # per chunk
+
+    def __init__(self, db: float):
+        self.target = 10 ** (db / 20)
+        self.g = self.target
+
+    def apply(self, data: bytes) -> bytes:
+        a = array.array("h", data)
+        peak = max(max(a), -min(a)) if a else 0
+        self.g = min(self.target, self.g * self.RELEASE)
+        if peak and peak * self.g > 32000:
+            self.g = 32000 / peak
+        if self.g == 1.0:
+            return data
+        g = self.g
+        return array.array("h", [int(v * g) for v in a]).tobytes()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("target", help="AirPlay receiver name (or part of it) or IP")
@@ -60,6 +85,7 @@ def main():
     ap.add_argument("--hold", type=float, default=10.0)
     ap.add_argument("--lead", type=int, default=500)
     ap.add_argument("--always", action="store_true")
+    ap.add_argument("--gain", type=float, default=0.0)
     ap.add_argument("--source", default="@DEFAULT_SOURCE@")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
@@ -71,6 +97,9 @@ def main():
     say(f"line in ({a.source}) -> {a.target} at {ip}:{port}; TXT {txt}")
     say(f"sending while the level is above {a.threshold_db:g} dBFS"
         if not a.always else "sending all the time (--always)")
+    gain = Gain(a.gain) if a.gain else None
+    if gain:
+        say(f"boosting the input by {a.gain:g} dB (limited so it doesn't clip)")
 
     parec = subprocess.Popen(
         ["parec", "-d", a.source, "--format=s16le", f"--rate={RATE}", "--channels=2",
@@ -79,7 +108,7 @@ def main():
     sender = None
     above_since = None
     below_since = time.monotonic()
-    peak_db, last_report, retry_at = -120.0, time.monotonic(), 0.0
+    peak_db, out_db, last_report, retry_at = -120.0, -120.0, time.monotonic(), 0.0
 
     def stop(*_):
         if sender:
@@ -96,6 +125,9 @@ def main():
         now = time.monotonic()
         db = level_db(data)
         peak_db = max(peak_db, db)
+        out = gain.apply(data) if gain else data
+        if gain:
+            out_db = max(out_db, level_db(out))
         if db >= a.threshold_db:
             below_since = None
             above_since = above_since or now
@@ -123,7 +155,7 @@ def main():
                 sender, retry_at = None, now + 5.0
                 continue
             try:
-                sender.write(data)              # the first pending sample ...
+                sender.write(out)               # the first pending sample ...
                 sender.proc.stdin.flush()
             except (BrokenPipeError, OSError, ValueError):
                 continue
@@ -138,14 +170,15 @@ def main():
             sender = None
         if sender is not None:
             try:
-                sender.write(data)
+                sender.write(out)
                 sender.proc.stdin.flush()
             except (BrokenPipeError, OSError, ValueError):
                 pass        # noticed as not alive on the next chunk
         if now - last_report >= REPORT_S:
             state = "sending" if sender else ("signal" if present else "no signal")
-            say(f"level: peak {peak_db:.0f} dBFS over {REPORT_S:g} s, {state}")
-            peak_db, last_report = -120.0, now
+            sent = f" (sent at {out_db:.0f} dBFS)" if gain and sender else ""
+            say(f"level: peak {peak_db:.0f} dBFS{sent} over {REPORT_S:g} s, {state}")
+            peak_db, out_db, last_report = -120.0, -120.0, now
 
 
 if __name__ == "__main__":
