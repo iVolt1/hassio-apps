@@ -5,6 +5,12 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.203)
+
+- Build: cliairplay is built from release v0.5.16 again. The
+  `shairport-start-wait` branch it was built from was merged upstream
+  (airplay-cli #117, in v0.5.14+) and deleted, so the 0.202 build failed.
+
 ### Fixed (0.202)
 
 - With the zones in their own network namespace (ap2_ip), avahi there now
