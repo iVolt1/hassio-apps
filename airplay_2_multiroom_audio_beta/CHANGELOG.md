@@ -12,6 +12,9 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
   address from the router; Music Assistant on this host chose it and could
   not connect ("native AirPlay 2 connect failed"), since this host reaches
   the zones only over IPv4 through ap2shim.
+- Build: cliairplay is built from release v0.5.16 again. The
+  `shairport-start-wait` branch it was built from was merged upstream
+  (airplay-cli #117, in v0.5.14+) and deleted, so the build failed.
 
 ### Changed (0.201)
 
