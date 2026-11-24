@@ -5,6 +5,14 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.202)
+
+- With the zones in their own network namespace (ap2_ip), avahi there now
+  announces IPv4 addresses only. The zones also picked up a global IPv6
+  address from the router; Music Assistant on this host chose it and could
+  not connect ("native AirPlay 2 connect failed"), since this host reaches
+  the zones only over IPv4 through ap2shim.
+
 ### Changed (0.201)
 
 - Panel wording: the first tab and its table are "AirPlay 2 receivers and

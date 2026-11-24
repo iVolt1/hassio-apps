@@ -451,10 +451,16 @@ if [ ! -d "$AVAHI_SERVICE" ]; then
 # service — which is why previously-stable zones (not just a newly
 # added one) can start cycling through "needs a rename" once a second
 # daemon with the same hostname shows up.
-awk -v iface="${AIRPLAY_INTERFACE}" '
+#
+# In the ap2 namespace, announce IPv4 only (use-ipv6=no). The zones there
+# also get a global IPv6 address from the router, but this host reaches
+# them only over IPv4 through ap2shim, so a sender on this host (MA) that
+# picks the IPv6 address can't connect.
+awk -v iface="${AIRPLAY_INTERFACE}" -v nov6="${NETNS_EXEC:+1}" '
     /^allow-interfaces=/ { next }
     /^host-name=/ { next }
-    /^\[server\]/ { print; if (iface != "") print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; next }
+    /^use-ipv6=/ { if (nov6) next }
+    /^\[server\]/ { print; if (iface != "") print "allow-interfaces=" iface; print "host-name=airplay2-multiroom"; if (nov6) print "use-ipv6=no"; next }
     { print }
 ' /etc/avahi/avahi-daemon.conf > /tmp/avahi-daemon.conf.new && \
     mv /tmp/avahi-daemon.conf.new /etc/avahi/avahi-daemon.conf
