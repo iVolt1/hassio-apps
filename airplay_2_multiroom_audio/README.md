@@ -89,7 +89,7 @@ Music Assistant may log `<zone> has not answered the server's PTP clock ... so i
 
 ## Per-zone settings
 
-Each sink-backed or Bluetooth zone has an override file:
+Each sink-backed, Bluetooth or Cast zone has an override file:
 
 ```
 /addon_configs/<add-on slug>/shairport-sync/config/<zone>-ap2.custom
@@ -97,7 +97,7 @@ Each sink-backed or Bluetooth zone has an override file:
 
 - It's created on the first start after the zone appears, containing only comments, and is never overwritten.
 - Its contents are included inside the zone's `general` block, so add plain `general` settings, each ending with a semicolon. Don't add a `general = { ... }` wrapper or other groups.
-- `name = "...";` renames the zone. A renamed zone gets a new AirPlay 2 device ID, so Music Assistant sees it as a new player.
+- `name = "...";` renames the zone (for a Cast zone this replaces the underscored name derived from the Cast device, e.g. `Living_Room` → `Living Room`). A renamed zone gets a new AirPlay 2 device ID, so Music Assistant sees it as a new player.
 - Don't set `port`, `interface`, `output_backend`, `udp_port_base` or `mdns_backend`: the add-on writes those, and a duplicate setting stops the zone from starting.
 - A syntax error stops only that zone; the error is in its `-ap2.log`.
 - Restart the add-on after editing.

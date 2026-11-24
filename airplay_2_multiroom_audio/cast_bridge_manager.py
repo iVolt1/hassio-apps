@@ -289,27 +289,63 @@ def open_log(path):
     return open(path, mode)
 
 
+def ensure_custom_file(custom_file: Path) -> None:
+    """Per-zone user overrides, spliced into the general block via libconfig's
+    @include, same as the sink zones (sink_zone_manager.py). Never overwritten
+    once it exists; it must always exist, a missing @include target stops
+    shairport-sync from parsing its config."""
+    if not custom_file.exists():
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        custom_file.write_text(
+            "// Per-zone shairport-sync overrides, included inside general = { ... }\n"
+            "// To rename the zone, set name here; do not define the other\n"
+            "// generated settings (port, interface, ...), libconfig rejects duplicates:\n"
+            "// name = \"Kitchen\";\n")
+        log.info("Created %s", custom_file)
+
+
+def custom_name(custom_file: Path):
+    """A `name = "...";` in the custom file replaces the generated one (libconfig
+    rejects a setting defined twice) and is also passed on the command line."""
+    try:
+        m = re.search(r'^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"\s*;',
+                      custom_file.read_text(), re.M)
+    except OSError:
+        return None
+    return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
+
+
 def start_shairport(name: str, fifo: str, port: int, udp_port_base: int) -> subprocess.Popen:
     PIPE_DIR.mkdir(parents=True, exist_ok=True)
     if not os.path.exists(fifo):
         os.mkfifo(fifo)
 
     config_file = CONFIG_DIR / f"{name}-ap2.conf"
+    custom_file = CONFIG_DIR / f"{name}-ap2.custom"
     log_file = LOG_DIR / f"{name}-ap2.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    ensure_custom_file(custom_file)
+    override = custom_name(custom_file)
+    display_name = override or name
+    if override:
+        name_line = ""  # the custom file supplies `name`
+    else:
+        escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+        name_line = f'  name = "{escaped}";\n'
 
     iface_line = f'  interface = "{AIRPLAY_INTERFACE}";\n' if AIRPLAY_INTERFACE else ""
     config_file.write_text(f"""\
 general :
 {{
-  name = "{name}";
-  port = {port};
+{name_line}  port = {port};
 {iface_line}  output_backend = "pipe";
   udp_port_base = {udp_port_base};
   mdns_backend = "avahi";
   audio_backend_buffer_desired_length_in_seconds = 0.1;
   audio_decoded_buffer_desired_length_in_seconds = 0.35;
   audio_backend_buffer_interpolation_threshold_in_seconds = 0.05;
+  @include "{custom_file}"
 }};
 sessioncontrol :
 {{
@@ -328,10 +364,10 @@ pipe :
 }};
 """)
 
-    log.info("Starting shairport-sync for '%s' on port %d -> %s", name, port, fifo)
+    log.info("Starting shairport-sync for '%s' (%s) on port %d -> %s", name, display_name, port, fifo)
     log_fh = open_log(log_file)
     return subprocess.Popen(
-        ["shairport-sync", "-a", name, "-p", str(port), "-c", str(config_file), shairport_verbosity()],
+        ["shairport-sync", "-a", display_name, "-p", str(port), "-c", str(config_file), shairport_verbosity()],
         stdout=log_fh, stderr=subprocess.STDOUT,
     )
 
