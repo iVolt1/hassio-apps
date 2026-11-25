@@ -79,9 +79,12 @@ fi
 # A macvlan's parent host cannot reach the macvlan itself, so a second
 # macvlan ("ap2shim") with its own IP is added on the HOST side plus a /32
 # route, so MA on this same host can reach the zones and hear their mDNS.
-# The shim lives in the host namespace and survives addon restarts; it is
-# deleted and recreated here every start (and stays until reboot if the
-# addon is uninstalled).
+# The shim lives in the host namespace and survives addon restarts. It is
+# kept and reused when it is still right (same parent, same address): Music
+# Assistant's mDNS (zeroconf) binds a socket to it, and a recreated shim
+# leaves that socket dead ("No such device"), so MA would stop finding the
+# zones until MA itself is restarted. It stays until reboot if the addon is
+# uninstalled.
 #
 # Any failure cleans up and falls back to the normal host-network mode.
 NETNS_EXEC=""
@@ -94,10 +97,35 @@ if [ -n "$AP2_IP" ]; then
     AP2_SHIM_IP="$(jq -r '.ap2_shim_ip // empty' "$AP2_OPTS")"
     AP2_PARENT="${AIRPLAY_INTERFACE}"
 
+    # Namespace and ap2mv only; the shim is kept (see above).
     ap2_cleanup() {
         ip netns del "$AP2_NS" 2>/dev/null
         ip link del ap2mv 2>/dev/null
+    }
+    ap2_cleanup_all() {
+        ap2_cleanup
         ip link del ap2shim 2>/dev/null
+    }
+
+    # Reuse an existing ap2shim on the right parent; otherwise (re)create it.
+    ap2_shim() {
+        if ip link show ap2shim >/dev/null 2>&1; then
+            if ip -o link show ap2shim | grep -q "ap2shim@${AP2_PARENT}:"; then
+                echo "ap2: reusing shim ap2shim"
+            else
+                echo "ap2: shim ap2shim is on another parent; recreating it"
+                ip link del ap2shim 2>/dev/null
+            fi
+        fi
+        if ! ip link show ap2shim >/dev/null 2>&1; then
+            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || { echo "ap2: creating shim macvlan ap2shim failed"; return 1; }
+        fi
+        # Exactly the configured address, nothing stale.
+        ip -4 -o addr show dev ap2shim | awk '{print $4}' | while read -r a; do
+            [ "$a" = "${AP2_SHIM_IP%/*}/32" ] || ip addr del "$a" dev ap2shim
+        done
+        ip addr replace "${AP2_SHIM_IP%/*}/32" dev ap2shim || { echo "ap2: adding the shim address failed"; return 1; }
+        ip link set ap2shim up || { echo "ap2: setting ap2shim up failed"; return 1; }
     }
 
     ap2_setup() {
@@ -137,9 +165,7 @@ if [ -n "$AP2_IP" ]; then
             ip -n "$AP2_NS" route add default via "$AP2_GW" || { echo "ap2: adding the default route failed"; return 1; }
         fi
         if [ -n "$AP2_SHIM_IP" ]; then
-            ip link add ap2shim link "$AP2_PARENT" type macvlan mode bridge || { echo "ap2: creating shim macvlan ap2shim failed"; return 1; }
-            ip addr add "${AP2_SHIM_IP%/*}/32" dev ap2shim || { echo "ap2: adding the shim address failed"; return 1; }
-            ip link set ap2shim up || { echo "ap2: setting ap2shim up failed"; return 1; }
+            ap2_shim || return 1
             # Send to the zones FROM the host's real IP (not the shim's), so
             # the PTP/RTSP source matches the timing-peer IP cliairplay
             # advertises; and route replies to the host IP back via the shim,
@@ -149,6 +175,7 @@ if [ -n "$AP2_IP" ]; then
             ip route replace "${AP2_IP%/*}/32" dev ap2shim src "$AP2_HOST_IP" || { echo "ap2: adding the host route via the shim failed"; return 1; }
             ip -n "$AP2_NS" route add "${AP2_HOST_IP}/32" via "${AP2_SHIM_IP%/*}" dev ap2mv || { echo "ap2: adding the namespace route to the host failed"; return 1; }
         else
+            ip link del ap2shim 2>/dev/null
             echo "ap2: WARNING no ap2_shim_ip set -- Music Assistant on this host will NOT be able to reach ${AP2_IP%/*}"
         fi
         echo "ap2: netns ${AP2_NS} up -- ${AP2_IP} on ap2mv (parent ${AP2_PARENT}), shim ${AP2_SHIM_IP:-none}, host ${AP2_HOST_IP:-n/a}"
@@ -175,8 +202,11 @@ if [ -n "$AP2_IP" ]; then
         AIRPLAY_INTERFACE=ap2mv
     else
         echo "ap2: setup FAILED -- falling back to host network mode (see errors above)" >> "$log_file"
-        ap2_cleanup
+        ap2_cleanup_all
     fi
+else
+    # ap2_ip unset (host network mode): drop a shim kept from earlier runs.
+    ip link del ap2shim 2>/dev/null
 fi
 
 if [ -n "${AIRPLAY_INTERFACE}" ]; then
