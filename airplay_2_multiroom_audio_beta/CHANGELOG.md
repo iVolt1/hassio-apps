@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (0.207)
+
+- Music Assistant no longer loses the zones after the add-on restarts or
+  updates. The host-side `ap2shim` interface was deleted and recreated on
+  every start, which left MA's mDNS socket on it dead ("No such device") and
+  MA stopped discovering the zones until MA itself was restarted. The shim
+  is now kept and reused when it is still on the right parent with the
+  right address.
+
 ### Added (0.206)
 
 - MQTT: each zone's Home Assistant device also gets a Cover image entity
