@@ -85,6 +85,15 @@ audio_backend_latency_offset_in_seconds = -0.25;
 
 The value is in seconds, and a negative value makes the zone play earlier. Because each zone has its own file, the offset applies only to that zone.
 
+### MQTT and Home Assistant
+
+With the **Mosquitto broker** add-on installed, every zone publishes over MQTT. Nothing needs setting up: the add-on gets the broker's details from the Supervisor. The `mqtt` option turns it off; restart the add-on after changing it.
+
+- **Sensors:** each zone shows up in Home Assistant as a device (manufacturer "Mike Brady", model "Shairport Sync") with sensors for title, artist, album, volume, the sender and whether it is playing, through MQTT discovery.
+- **Topics:** `airplay2/<zone>/` with `artist`, `title`, `album`, `volume`, `play_start`, `play_end` and more, plus `cover` (the artwork). Messages are retained. `<zone>` is the zone's name with spaces and other symbols as `_`, e.g. `airplay2/Dining_Room/title`.
+- **Remote control:** publish `play`, `pause`, `playpause`, `nextitem`, `previtem`, `volumeup`, `volumedown` or `stop` to `airplay2/<zone>/remote`. The command goes to the sender that is playing to the zone, for example the iPhone.
+- With `ap2_ip` set, the zones reach the broker on this host's LAN address, so Mosquitto's MQTT port (1883) must stay mapped to the host, as it is by default.
+
 ### Using a Bluetooth speaker as a zone
 
 A Bluetooth speaker can be an AirPlay 2 zone like any other output, as long as PulseAudio sees it as a sink and a remap sink has been built on top of it.

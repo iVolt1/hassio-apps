@@ -185,6 +185,23 @@ else
     AIRPLAY_INTERFACE_EXPORT=""
 fi
 
+# MQTT for Home Assistant (mqtt_zone.py): the zone managers' run scripts ask
+# the Supervisor for the Mosquitto broker when they start, here on the host
+# side, before exec'ing into the namespace (which can't reach the
+# Supervisor). In the namespace the zones reach the broker through the host's
+# LAN address, where Mosquitto publishes its port, not by its internal name.
+# Unless the mqtt option is off; no broker installed = no MQTT, as before.
+MQTT_EXPORT='if ! bashio::config.false mqtt && bashio::services.available mqtt; then
+    export AP2_MQTT_HOST="$(bashio::services mqtt host)"
+    export AP2_MQTT_PORT="$(bashio::services mqtt port)"
+    export AP2_MQTT_USER="$(bashio::services mqtt username)"
+    export AP2_MQTT_PASSWORD="$(bashio::services mqtt password)"
+fi'
+if [ -n "${NETNS_EXEC}" ] && [ -n "${AP2_HOST_IP}" ]; then
+    MQTT_EXPORT="${MQTT_EXPORT}
+if [ -n \"\${AP2_MQTT_HOST:-}\" ]; then export AP2_MQTT_HOST=\"${AP2_HOST_IP}\"; fi"
+fi
+
 # --- Bounce master sinks & recreate remap sinks before generating zone services ----------------
 # HDMI (and some other ALSA-card) sinks don't resume cleanly on their own
 # after the receiver is power-cycled or the cable is unplugged/replugged:
@@ -507,6 +524,7 @@ if [ ! -d "$CASTBRIDGE_MANAGER_SERVICE" ]; then
     cat > "${CASTBRIDGE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 ${AIRPLAY_INTERFACE_EXPORT}
+${MQTT_EXPORT}
 mkdir -p /config/cast-bridge/logs
 exec ${NETNS_EXEC}python3 /usr/sbin/cast_bridge_manager.py >> /config/cast-bridge/logs/cast_bridge_manager.log 2>&1
 EOF
@@ -563,6 +581,7 @@ if [ ! -d "$SINK_ZONE_MANAGER_SERVICE" ]; then
     cat > "${SINK_ZONE_MANAGER_SERVICE}/run" <<EOF
 #!/usr/bin/with-contenv bashio
 ${AIRPLAY_INTERFACE_EXPORT}
+${MQTT_EXPORT}
 mkdir -p /config/shairport-sync/logs
 exec ${NETNS_EXEC}python3 /usr/sbin/sink_zone_manager.py >> /config/shairport-sync/logs/sink_zone_manager.log 2>&1
 EOF

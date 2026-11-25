@@ -6,6 +6,14 @@ configuration:
       add-on starts, before any zone starts (same as bluetoothctl power off /
       power on). For adapters that stay connected but stop playing audio.
       The web panel's Bluetooth section has a button for doing this any time.
+  mqtt:
+    name: Publish zones over MQTT
+    description: >-
+      With the Mosquitto broker add-on installed, each zone publishes what it
+      plays (title, artist, album, cover, volume, playing or not) under
+      airplay2/<zone>/, appears in Home Assistant as a device with sensors
+      (MQTT discovery), and takes commands such as play, pause, nextitem and
+      volumeup on airplay2/<zone>/remote. Restart the add-on after changing it.
   log_level:
     name: shairport-sync log level
     description: >-

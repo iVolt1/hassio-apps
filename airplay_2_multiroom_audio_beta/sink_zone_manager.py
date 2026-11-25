@@ -60,6 +60,8 @@ import threading
 import time
 from pathlib import Path
 
+import mqtt_zone
+
 log = logging.getLogger("sink_zone_manager")
 
 CONFIG_DIR = Path(os.environ.get("SZM_CONFIG_DIR", "/config/shairport-sync/config"))
@@ -537,7 +539,7 @@ pulseaudio :
   sink = "{self.pa_sink}";
   application_name = "Shairport Sync";
 }};
-""")
+{mqtt_zone.mqtt_block(self.display_name)}""")
 
     def start(self, fresh: bool = True):
         """fresh=True truncates the zone log (a new session of the zone);
