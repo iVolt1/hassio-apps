@@ -127,6 +127,7 @@ COPY cast_bridge_zone.py /usr/sbin/cast_bridge_zone.py
 COPY sink_zone_manager.py /usr/sbin/sink_zone_manager.py
 COPY remap_sinks.py /usr/sbin/remap_sinks.py
 COPY panel_settings.py /usr/sbin/panel_settings.py
+COPY mqtt_zone.py /usr/sbin/mqtt_zone.py
 COPY web_panel.py /usr/sbin/web_panel.py
 COPY bt_reset.py /usr/sbin/bt_reset.py
 COPY ap1_test.py /usr/sbin/ap1_test.py

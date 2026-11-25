@@ -5,6 +5,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.204)
+
+- MQTT for Home Assistant: with the Mosquitto broker add-on installed, each
+  zone (sink, Bluetooth and Cast) publishes its now-playing info, cover and
+  volume under `airplay2/<zone>/` (retained), shows up in Home Assistant as a
+  device with sensors through MQTT discovery, and takes remote commands on
+  `airplay2/<zone>/remote`. The broker is found through the Supervisor; a new
+  `mqtt` option (on by default) turns it off. No broker: no change.
+
 ### Fixed (0.203)
 
 - Build: cliairplay is built from release v0.5.16 again. The

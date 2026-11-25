@@ -58,6 +58,7 @@ import time
 import types
 from pathlib import Path
 
+import mqtt_zone
 import pychromecast
 import zeroconf as zeroconf_lib
 
@@ -352,7 +353,7 @@ pipe :
   output_rate = {PIPE_SAMPLE_RATE};
   output_format = "{PIPE_OUTPUT_FORMAT}";
 }};
-""")
+{mqtt_zone.mqtt_block(name)}""")
 
     log.info("Starting shairport-sync for '%s' on port %d -> %s", name, port, fifo)
     log_fh = open_log(log_file)
