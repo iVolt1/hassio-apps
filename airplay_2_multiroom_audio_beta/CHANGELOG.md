@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.206)
+
+- MQTT: each zone's Home Assistant device also gets a Cover image entity
+  showing the artwork of what plays, from `airplay2/<zone>/cover`. New
+  buttons and cover get predictable entity ids, e.g.
+  `image.airplay2_dining_room_cover`, `button.airplay2_dining_room_volumeup`.
+
 ### Added (0.205)
 
 - MQTT: each zone's Home Assistant device also gets buttons for volume up,

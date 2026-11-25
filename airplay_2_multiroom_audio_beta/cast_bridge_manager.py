@@ -355,7 +355,7 @@ pipe :
 }};
 {mqtt_zone.mqtt_block(name)}""")
 
-    mqtt_zone.publish_buttons(name)
+    mqtt_zone.publish_discovery(name)
     log.info("Starting shairport-sync for '%s' on port %d -> %s", name, port, fifo)
     log_fh = open_log(log_file)
     return subprocess.Popen(
