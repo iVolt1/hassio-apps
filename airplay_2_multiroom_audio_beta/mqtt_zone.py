@@ -11,10 +11,22 @@ play_start, play_end, ... and the cover), with retain on, announces its
 sensors to Home Assistant (MQTT discovery) and takes remote commands on
 airplay2/<zone>/remote (play, pause, nextitem, previtem, volumeup, ...).
 No broker, or the add-on's mqtt option off: no block, as before.
+
+shairport-sync's own discovery only announces sensors. publish_buttons()
+adds Home Assistant buttons (volume up/down, play/pause, next, previous) to
+the same device, publishing to the zone's remote topic.
 """
 
+import json
+import logging
 import os
 import re
+import threading
+
+log = logging.getLogger(__name__)
+# paho logs a harmless "Client is not connected" at ERROR when publish.multiple()
+# disconnects; our own warning covers real failures.
+logging.getLogger("paho").setLevel(logging.CRITICAL)
 
 TOPIC_PREFIX = "airplay2"
 
@@ -51,3 +63,75 @@ def mqtt_block(zone_name: str) -> str:
         '  enable_remote = "yes";',
     ]
     return "mqtt :\n{\n" + "\n".join(lines) + "\n};\n"
+
+
+# (command, button name, icon): commands from shairport-sync's MQTT remote.
+BUTTONS = (
+    ("volumeup", "Volume up", "mdi:volume-plus"),
+    ("volumedown", "Volume down", "mdi:volume-minus"),
+    ("playpause", "Play/pause", "mdi:play-pause"),
+    ("nextitem", "Next", "mdi:skip-next"),
+    ("previtem", "Previous", "mdi:skip-previous"),
+)
+_published = set()
+
+
+def device_id(zone_name: str) -> str:
+    """The AirPlay device id shairport-sync derives from the zone name (FNV-1a
+    of the name, locally administered, unicast; shairport.c), e.g.
+    "c6:f2:ef:18:ba:dd". Its MQTT discovery uses it as the device identifier,
+    so buttons with the same one join that device."""
+    h = 1469598103934665603
+    for b in zone_name.encode():
+        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    i = h & 0xFFFFFFFFFFFF
+    top = (((i >> 40) & 0xFE) | 0x02) << 40
+    i = (i & 0xFFFFFFFFFF) | top
+    return ":".join(f"{(i >> s) & 0xFF:02x}" for s in range(40, -8, -8))
+
+
+def button_messages(zone_name: str):
+    dev = device_id(zone_name)
+    uid = "shairport-sync_" + dev.replace(":", "")
+    remote = topic_for(zone_name) + "/remote"
+    msgs = []
+    for cmd, label, icon in BUTTONS:
+        msgs.append({
+            "topic": f"homeassistant/button/{uid}/{cmd}/config",
+            "payload": json.dumps({
+                "name": label,
+                "unique_id": f"{uid}_{cmd}",
+                "command_topic": remote,
+                "payload_press": cmd,
+                "icon": icon,
+                "device": {"identifiers": [dev], "name": zone_name},
+            }),
+            "retain": True,
+        })
+    return msgs
+
+
+def publish_buttons(zone_name: str) -> None:
+    """Announce the zone's buttons (retained), once per zone name and run, in
+    the background so a slow or missing broker never holds up a zone start."""
+    host = os.environ.get("AP2_MQTT_HOST", "")
+    if not host or zone_name in _published:
+        return
+    _published.add(zone_name)
+
+    def run():
+        try:
+            from paho.mqtt import publish
+            auth = None
+            if os.environ.get("AP2_MQTT_USER"):
+                auth = {"username": os.environ["AP2_MQTT_USER"],
+                        "password": os.environ.get("AP2_MQTT_PASSWORD", "")}
+            publish.multiple(button_messages(zone_name), hostname=host,
+                             port=int(os.environ.get("AP2_MQTT_PORT") or 1883),
+                             auth=auth, client_id="")
+            log.info("MQTT: announced buttons for %s", zone_name)
+        except Exception as e:  # noqa: BLE001 -- never let this hurt the zone
+            _published.discard(zone_name)
+            log.warning("MQTT: could not announce buttons for %s: %s", zone_name, e)
+
+    threading.Thread(target=run, name=f"mqtt-buttons-{zone_name}", daemon=True).start()

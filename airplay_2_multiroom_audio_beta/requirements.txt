@@ -6,3 +6,5 @@
 # multicast traffic.
 pychromecast>=14.0.0
 zeroconf>=0.130.0
+# mqtt_zone.py: Home Assistant buttons for each zone (MQTT discovery).
+paho-mqtt>=2.0

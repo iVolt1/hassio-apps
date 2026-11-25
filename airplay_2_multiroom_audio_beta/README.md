@@ -91,7 +91,8 @@ With the **Mosquitto broker** add-on installed, every zone publishes over MQTT. 
 
 - **Sensors:** each zone shows up in Home Assistant as a device (manufacturer "Mike Brady", model "Shairport Sync") with sensors for title, artist, album, volume, the sender and whether it is playing, through MQTT discovery.
 - **Topics:** `airplay2/<zone>/` with `artist`, `title`, `album`, `volume`, `play_start`, `play_end` and more, plus `cover` (the artwork). Messages are retained. `<zone>` is the zone's name with spaces and other symbols as `_`, e.g. `airplay2/Dining_Room/title`.
-- **Remote control:** publish `play`, `pause`, `playpause`, `nextitem`, `previtem`, `volumeup`, `volumedown` or `stop` to `airplay2/<zone>/remote`. The command goes to the sender that is playing to the zone, for example the iPhone.
+- **Buttons:** each zone's device also has Volume up, Volume down, Play/pause, Next and Previous buttons. They act on the sender that is playing to the zone, for example the iPhone (a volume press is one step of its AirPlay volume), and do nothing while nothing is playing.
+- **Remote control:** the buttons publish to the zone's remote topic; you can also publish `play`, `pause`, `playpause`, `nextitem`, `previtem`, `volumeup`, `volumedown` or `stop` to `airplay2/<zone>/remote`. The command goes to the sender that is playing to the zone, for example the iPhone. There is no command to set an absolute volume.
 - With `ap2_ip` set, the zones reach the broker on this host's LAN address, so Mosquitto's MQTT port (1883) must stay mapped to the host, as it is by default.
 
 ### Using a Bluetooth speaker as a zone

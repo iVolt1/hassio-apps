@@ -547,6 +547,7 @@ pulseaudio :
         restart that follows it."""
         self._ensure_custom_file()
         self._write_config()
+        mqtt_zone.publish_buttons(self.display_name)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", self.display_name).strip("_") or self.sink
         log_file = LOG_DIR / f"{stem}-ap2.log"

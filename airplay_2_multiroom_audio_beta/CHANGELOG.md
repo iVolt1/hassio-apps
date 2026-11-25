@@ -5,6 +5,13 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (0.205)
+
+- MQTT: each zone's Home Assistant device also gets buttons for volume up,
+  volume down, play/pause, next and previous. They publish to
+  `airplay2/<zone>/remote`, so they act on the sender playing to the zone
+  (e.g. the iPhone), and do nothing when nothing is playing.
+
 ### Added (0.204)
 
 - MQTT for Home Assistant: with the Mosquitto broker add-on installed, each
