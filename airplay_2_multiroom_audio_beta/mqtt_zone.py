@@ -12,9 +12,10 @@ sensors to Home Assistant (MQTT discovery) and takes remote commands on
 airplay2/<zone>/remote (play, pause, nextitem, previtem, volumeup, ...).
 No broker, or the add-on's mqtt option off: no block, as before.
 
-shairport-sync's own discovery only announces sensors. publish_buttons()
-adds Home Assistant buttons (volume up/down, play/pause, next, previous) to
-the same device, publishing to the zone's remote topic.
+shairport-sync's own discovery only announces sensors. publish_discovery()
+adds to the same device Home Assistant buttons (volume up/down, play/pause,
+next, previous), publishing to the zone's remote topic, and an image entity
+showing the cover art from the zone's cover topic.
 """
 
 import json
@@ -90,10 +91,14 @@ def device_id(zone_name: str) -> str:
     return ":".join(f"{(i >> s) & 0xFF:02x}" for s in range(40, -8, -8))
 
 
-def button_messages(zone_name: str):
+def discovery_messages(zone_name: str):
     dev = device_id(zone_name)
     uid = "shairport-sync_" + dev.replace(":", "")
-    remote = topic_for(zone_name) + "/remote"
+    topic = topic_for(zone_name)
+    # Predictable entity ids for new entities (e.g. image.airplay2_dining_room_cover);
+    # ones Home Assistant already has keep theirs.
+    ent = "airplay2_" + topic.split("/", 1)[1].lower()
+    device = {"identifiers": [dev], "name": zone_name}
     msgs = []
     for cmd, label, icon in BUTTONS:
         msgs.append({
@@ -101,19 +106,35 @@ def button_messages(zone_name: str):
             "payload": json.dumps({
                 "name": label,
                 "unique_id": f"{uid}_{cmd}",
-                "command_topic": remote,
+                "default_entity_id": f"button.{ent}_{cmd}",
+                "command_topic": topic + "/remote",
                 "payload_press": cmd,
                 "icon": icon,
-                "device": {"identifiers": [dev], "name": zone_name},
+                "device": device,
             }),
             "retain": True,
         })
+    # The cover art shairport-sync publishes (raw image bytes, retained).
+    msgs.append({
+        "topic": f"homeassistant/image/{uid}/cover/config",
+        "payload": json.dumps({
+            "name": "Cover",
+            "unique_id": f"{uid}_cover",
+            "default_entity_id": f"image.{ent}_cover",
+            "image_topic": topic + "/cover",
+            "content_type": "image/jpeg",
+            "icon": "mdi:image-album",
+            "device": device,
+        }),
+        "retain": True,
+    })
     return msgs
 
 
-def publish_buttons(zone_name: str) -> None:
-    """Announce the zone's buttons (retained), once per zone name and run, in
-    the background so a slow or missing broker never holds up a zone start."""
+def publish_discovery(zone_name: str) -> None:
+    """Announce the zone's buttons and cover image (retained), once per zone
+    name and run, in the background so a slow or missing broker never holds
+    up a zone start."""
     host = os.environ.get("AP2_MQTT_HOST", "")
     if not host or zone_name in _published:
         return
@@ -126,12 +147,12 @@ def publish_buttons(zone_name: str) -> None:
             if os.environ.get("AP2_MQTT_USER"):
                 auth = {"username": os.environ["AP2_MQTT_USER"],
                         "password": os.environ.get("AP2_MQTT_PASSWORD", "")}
-            publish.multiple(button_messages(zone_name), hostname=host,
+            publish.multiple(discovery_messages(zone_name), hostname=host,
                              port=int(os.environ.get("AP2_MQTT_PORT") or 1883),
                              auth=auth, client_id="")
-            log.info("MQTT: announced buttons for %s", zone_name)
+            log.info("MQTT: announced buttons and cover for %s", zone_name)
         except Exception as e:  # noqa: BLE001 -- never let this hurt the zone
             _published.discard(zone_name)
-            log.warning("MQTT: could not announce buttons for %s: %s", zone_name, e)
+            log.warning("MQTT: could not announce buttons and cover for %s: %s", zone_name, e)
 
-    threading.Thread(target=run, name=f"mqtt-buttons-{zone_name}", daemon=True).start()
+    threading.Thread(target=run, name=f"mqtt-discovery-{zone_name}", daemon=True).start()
