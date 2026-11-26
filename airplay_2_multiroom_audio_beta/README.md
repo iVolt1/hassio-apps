@@ -1,16 +1,14 @@
 # AirPlay 2 Multiroom Audio
 
-Turn your existing PulseAudio-backed audio hardware **and** your Google Cast (Chromecast/Google Home) speakers into AirPlay 2 receivers, so you can play to all of them — individually or grouped — from any AirPlay 2 source (iPhone, iPad, Mac).
+Turns the sound cards, Bluetooth speakers and Chromecasts connected to your Home Assistant into AirPlay 2 speakers you can play to one at a time or all together.
 
-This addon merges what used to be two separate things — AirPlay 2 receivers for local sound cards, and a bridge that relays AirPlay 2 audio to Google Cast devices — into a single Home Assistant addon.
-
-## What it does
-
-- Scans your system's PulseAudio sinks and creates an [AirPlay 2](https://github.com/mikebrady/shairport-sync) receiver (via `shairport-sync`) for each one, so each physical output (a zone, a room, a card's channel pair) shows up as its own AirPlay 2 speaker.
-- Scans your network for Google Cast devices (speakers, speaker groups/stereo pairs, Cast-enabled soundbars) and creates a matching AirPlay 2 receiver for each one too, relaying the audio through to Cast — so devices that don't natively speak AirPlay 2 still show up as AirPlay 2 speakers.
-- Skips any Cast device that's already advertising its own, real AirPlay 2 receiver (some TVs and soundbars have this built in) — it's detected automatically, not configured by name, so you never end up with two entries for the same physical device.
-- All AirPlay 2 zones — sink-backed and Cast-backed alike — support AirPlay 2's native multi-room grouping, so you can select several speakers at once from your source device.
-- This addon doesn't limit you to just the zones it creates: any other AirPlay 2 receiver already on your network (a HomePod, a smart TV, a soundbar with AirPlay 2 built in, another addon's receivers) shows up in your source's AirPlay picker right alongside this addon's zones, and can be grouped together with them the same way, since AirPlay 2 multi-room isn't specific to this addon — it's a standard feature of the protocol itself.
+- **Every room becomes an AirPlay 2 speaker:** each sound card output, each stereo pair of a 5.1/7.1 card, each Bluetooth speaker and each Chromecast.
+- **Play from anywhere:** your iPhone, iPad or Mac, or Music Assistant.
+- **Group rooms in sync:** with each other and with HomePods, TVs and other AirPlay 2 speakers.
+- **Bring older speakers along:** AirPlay 1-only receivers become AirPlay 2 speakers that can join groups.
+- **One room, several speakers:** a combine sink plays to several outputs as one speaker.
+- **Line in:** a turntable, TV or PC plugged into the default input plays through Music Assistant in any room.
+- **Set up in a web panel:** rooms on and off, names, delay and volume limits, sample rates, nothing to type by hand.
 
 ## Requirements
 
